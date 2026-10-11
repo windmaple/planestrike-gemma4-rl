@@ -135,6 +135,7 @@ class PlaneStrikeEnv(BaseTaskEnv):
     self.strikes: list[int] = []
     self.total_reward = 0.0
     self._logged = False
+    self.game_record: dict[str, Any] | None = None
 
   def _observation(self, last_result: str | None) -> dict[str, Any]:
     return {
@@ -189,7 +190,7 @@ class PlaneStrikeEnv(BaseTaskEnv):
     if self._logged:
       return
     self._logged = True
-    GameLogger.log({
+    self.game_record = {
         "split": self.split,
         "policy_version": self.task.get("policy_version"),
         "seed": self.seed,
@@ -203,4 +204,5 @@ class PlaneStrikeEnv(BaseTaskEnv):
         "repeats": self.num_repeats,
         "invalid": self.num_invalid,
         "reward": self.total_reward,
-    })
+    }
+    GameLogger.log(self.game_record)

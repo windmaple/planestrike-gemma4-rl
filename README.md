@@ -153,7 +153,8 @@ python baseline_eval.py --policy model --num_games 64 --out results/baseline_gem
 
 # Training (background, auto-restart; resumes from the latest checkpoint).
 # Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
-# 1024, lr schedule 3e-6 -> 5e-6 at step 40 -> 2.5e-6 at step 65 (--lr_schedule).
+# 1024, lr 3e-6 held to step 40 then cosine decay to 3e-7 at --num_steps
+# (--lr_decay, --lr_decay_start, --lr_end; --lr_schedule for piecewise constant).
 setsid nohup python watchdog.py --run_dir runs/grpo_turn20_70 -- --num_steps 70 --max_to_keep 4 > logs/grpo_turn20_70_watchdog.log 2>&1 &
 # Stop: kill <watchdog_pid from runs/grpo_turn20_70/watchdog_status.json>
 
@@ -161,6 +162,14 @@ setsid nohup python watchdog.py --run_dir runs/grpo_turn20_70 -- --num_steps 70 
 .plotenv/bin/python plot_game_length.py --run_dir runs/grpo_turn20_70
 tensorboard --logdir runs/grpo_turn20_70/tensorboard   # games/train/game_length
 ```
+
+Metrics also go to W&B (project `planestrike`, `--wandb_project`) whenever
+`wandb` is installed and logged in; set `WANDB_MODE=disabled` to turn it off.
+Per-step game stats are under `game/train/*` and `game/eval/*` (`length`,
+`win_rate`, `hits`, `repeats`, `invalid`, `truncated`). The W&B run id is
+kept in `<run_dir>/wandb_id.txt`, so watchdog restarts resume the same run;
+steps replayed after a checkpoint resume are dropped by W&B (it requires
+increasing steps).
 
 ## Results
 
@@ -205,7 +214,8 @@ lr: `--lr_schedule 0:3e-6,40:5e-6,65:2.5e-6`, then 1e-6 from step 100
 91% (steps 100 + 110); random 24.00 / 0%, pre-RL model 23.19 / 9.4%. lr 3e-6
 plateaued at ~20.6 from step 30; 5e-6 from step 40 reached ~18.5 but entropy
 collapsed (0.39 -> 0.13) over steps 65-78, so the run was rolled back to step 70
-and finished at 2.5e-6. That path is now the default `--lr_schedule`.
+and finished at 2.5e-6. That path was the default `--lr_schedule` until the
+cosine decay replaced it.
 
 ### Previous run: 30-strike cap (artifacts deleted)
 

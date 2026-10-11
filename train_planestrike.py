@@ -8,7 +8,9 @@ Follows tunix/examples/frozenlake/train_frozenlake.py. Differences:
   * Context budget, per-turn cap and episode timeout are sized so that a
     full game is not clipped (see README.md).
   * Every finished game is appended to <run_dir>/games.jsonl and logged to
-    TensorBoard as `game_length`, like the original training_jax.py.
+    TensorBoard as `game_length`, like the original training_jax.py. Per-step
+    game stats (`game/*`) also go through Tunix's metrics logger (TensorBoard
+    and W&B).
   * Uncaught exceptions in any thread hard-exit the process (exit code 42 for
     OOM) so that a crashed vLLM/trainer thread cannot leave the job hanging;
     watchdog.py restarts it from the latest checkpoint.
@@ -69,11 +71,16 @@ arg_parser.add_argument("--num_generations", type=int, default=8, help="Games pe
 # Tunix applies an optimizer update after every micro-batch (one board's group
 # of games), i.e. batch_size updates per step, as in the frozenlake recipe.
 arg_parser.add_argument("--learning_rate", type=float, default=3e-6,
-                        help="Used when --lr_schedule is empty.")
+                        help="Peak lr, held until --lr_decay_start.")
+# Default: hold 3e-6, then cosine decay to --lr_end at --num_steps. At a
+# 24-strike cap, 3e-6 improved steadily to step ~40; raising it to 5e-6 there
+# gave the best eval at step 50 and then a regression (18.7 -> 21.2 strikes).
+arg_parser.add_argument("--lr_decay", default="cosine", choices=["cosine", "none"])
+arg_parser.add_argument("--lr_decay_start", type=int, default=40, help="Training step.")
+arg_parser.add_argument("--lr_end", type=float, default=3e-7)
 # "step:lr,step:lr,..." in training steps; the first entry must be step 0.
-# Default: the path that worked at a 24-strike cap (3e-6, 5e-6 from step 40 to
-# break a plateau, 2.5e-6 from step 65 before entropy collapsed).
-arg_parser.add_argument("--lr_schedule", default="0:3e-6,40:5e-6,65:2.5e-6")
+# Overrides the above when set (previous default: "0:3e-6,40:5e-6,65:2.5e-6").
+arg_parser.add_argument("--lr_schedule", default="")
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--max_grad_norm", type=float, default=1.0)
@@ -88,7 +95,7 @@ arg_parser.add_argument("--advantage_mode", default="turn", choices=["turn", "tr
 arg_parser.add_argument("--turn_gamma", type=float, default=0.5,
                         help="Discount for --advantage_mode turn (original example: GAMMA = 0.5).")
 arg_parser.add_argument("--temperature", type=float, default=0.7)
-arg_parser.add_argument("--max_steps_per_game", type=int, default=20,
+arg_parser.add_argument("--max_steps_per_game", type=int, default=24,
                         help="Must match env.MAX_STEPS (also stated in the system prompt).")
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=32768,
@@ -120,6 +127,10 @@ arg_parser.add_argument("--save_every", type=int, default=5)
 arg_parser.add_argument("--max_to_keep", type=int, default=2,
                         help="Checkpoints kept in /dev/shm (~27 GB each).")
 arg_parser.add_argument("--seed", type=int, default=42)
+# Tunix logs to W&B whenever `wandb` is importable (set WANDB_MODE=disabled to
+# turn it off). The run id is kept in <run_dir>/wandb_id.txt so watchdog
+# restarts resume the same W&B run.
+arg_parser.add_argument("--wandb_project", default="planestrike")
 args, _ = arg_parser.parse_known_args()
 
 # XLA's latency-hiding scheduler overlaps layers in the train step and keeps
@@ -252,13 +263,33 @@ class PlaneStrikeGRPOLearner(_LearnerBase):
 
   turn_gamma = args.turn_gamma
 
+  def _build_orchestrator(self):
+    orchestrator = super()._build_orchestrator()
+    orchestrator.engine_cls = turn_credit.StepInfoEngine  # Adds "game_record".
+    return orchestrator
+
   def _model_call(self, chat_lists, env=None, max_generation_steps=None, **kwargs):
     if max_generation_steps is not None:
       max_generation_steps = min(max_generation_steps, args.max_tokens_per_turn)
     return super()._model_call(
         chat_lists, env, max_generation_steps=max_generation_steps, **kwargs)
 
-  def _process_results(self, trajectories, *args, **kwargs):
+  def _process_results(self, trajectories, mode=rl_engine_lib.Mode.TRAIN, expected_step=None):
+    games = [item.traj.get("game_record") for item in trajectories]
+    games = [g for g in games if g]
+    if games:
+      # A truncated game counts as the cap, as in plot_game_length.py.
+      lengths = [g["max_steps"] if g["truncated"] else g["game_length"] for g in games]
+      self.rl_engine.buffer_metrics_async(
+          {
+              "game/length": (float(np.mean(lengths)), np.mean),
+              "game/win_rate": (float(np.mean([g["won"] for g in games])), np.mean),
+              "game/hits": (float(np.mean([g["hits"] for g in games])), np.mean),
+              "game/repeats": (float(np.mean([g["repeats"] for g in games])), np.mean),
+              "game/invalid": (float(np.mean([g["invalid"] for g in games])), np.mean),
+              "game/truncated": (float(np.mean([g["truncated"] for g in games])), np.mean),
+          },
+          mode=mode, step=expected_step)
     for item in trajectories:
       turn_credit.penalize_truncation(item.traj, MAX_STEPS_PER_GAME, env_lib.STEP_COST)
       if SOFT_TOKENS_PER_TURN > 0:
@@ -267,7 +298,7 @@ class PlaneStrikeGRPOLearner(_LearnerBase):
       if turn_credit.clip_to_budget(item.traj, args_max_response_length):
         absl_logging.warning("Trimmed an over-budget trajectory (group %s) to %d tokens.",
                              item.traj.get("group_id"), args_max_response_length)
-    return super()._process_results(trajectories, *args, **kwargs)
+    return super()._process_results(trajectories, mode=mode, expected_step=expected_step)
 
 
 # ====== Model ======
@@ -295,12 +326,20 @@ tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_VERSION)
 chat_parser = parser_lib.Gemma4ChatTemplateParser(tokenizer, enable_thinking=True)
 
 def make_learning_rate():
-  if not args.lr_schedule:
-    return args.learning_rate
-  points = [(int(s), float(v)) for s, v in (p.split(":") for p in args.lr_schedule.split(","))]
-  assert points[0][0] == 0, "lr_schedule must start at step 0"
   # One optimizer update per board group, i.e. batch_size updates per training
   # step. Adam's update count is checkpointed, so a resume keeps its place.
+  if not args.lr_schedule:
+    if args.lr_decay == "none":
+      return args.learning_rate
+    decay_start = args.lr_decay_start * args.batch_size
+    return optax.join_schedules(
+        [optax.constant_schedule(args.learning_rate),
+         optax.cosine_decay_schedule(
+             args.learning_rate, (args.num_steps - args.lr_decay_start) * args.batch_size,
+             alpha=args.lr_end / args.learning_rate)],
+        [decay_start])
+  points = [(int(s), float(v)) for s, v in (p.split(":") for p in args.lr_schedule.split(","))]
+  assert points[0][0] == 0, "lr_schedule must start at step 0"
   return optax.piecewise_constant_schedule(
       points[0][1],
       {step * args.batch_size: lr / prev for (step, lr), (_, prev) in zip(points[1:], points)})
@@ -345,8 +384,17 @@ rollout_config = base_rollout.RolloutConfig(
     rollout_vllm_sampling_kwargs={"skip_special_tokens": False},
 )
 
+WANDB_ID_PATH = os.path.join(args.run_dir, "wandb_id.txt")
+if not os.path.exists(WANDB_ID_PATH):
+  with open(WANDB_ID_PATH, "w") as f:
+    f.write(f"{RUN_NAME}-{int(time.time())}")
+with open(WANDB_ID_PATH) as f:
+  WANDB_ID = f.read().strip()
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=TB_DIR, project_name="planestrike", run_name=RUN_NAME, flush_every_n_steps=1)
+    log_dir=TB_DIR, project_name=args.wandb_project, run_name=RUN_NAME, flush_every_n_steps=1,
+    backend_kwargs={"wandb": {
+        "id": WANDB_ID, "resume": "allow", "dir": args.run_dir, "config": vars(args),
+    }})
 
 cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
