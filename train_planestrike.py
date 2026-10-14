@@ -95,7 +95,7 @@ arg_parser.add_argument("--advantage_mode", default="turn", choices=["turn", "tr
 arg_parser.add_argument("--turn_gamma", type=float, default=0.5,
                         help="Discount for --advantage_mode turn (original example: GAMMA = 0.5).")
 arg_parser.add_argument("--temperature", type=float, default=0.7)
-arg_parser.add_argument("--max_steps_per_game", type=int, default=24,
+arg_parser.add_argument("--max_steps_per_game", type=int, default=16,
                         help="Must match env.MAX_STEPS (also stated in the system prompt).")
 arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=32768,

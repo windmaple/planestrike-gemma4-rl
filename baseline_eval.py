@@ -66,7 +66,8 @@ def run_random():
     rng = random.Random(g)
     done = False
     while not done:
-      untried = [i for i in range(64) if e.board[i // 8][i % 8] == env_lib.CELL_UNTRIED]
+      n = env_lib.BOARD_SIZE
+      untried = [i for i in range(n * n) if e.board[i // n][i % n] == env_lib.CELL_UNTRIED]
       _, _, done, info = e.step(rng.choice(untried))
     records.append({"game_length": e.step_count, "won": info["won"], "hits": e.hit_count,
                     "repeats": e.num_repeats, "invalid": e.num_invalid})

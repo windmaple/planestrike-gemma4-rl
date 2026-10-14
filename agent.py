@@ -13,7 +13,7 @@ import env as env_lib
 SYSTEM_PROMPT: str = """You are playing Plane Strike, a single-player board game.
 
 Rules:
-- The board is an 8x8 grid. Columns are labelled A-H and rows 1-8, so a cell is named like C5.
+- The board is a {n}x{n} grid. Columns are labelled A-{last_col} and rows 1-{n}, so a cell is named like C5.
 - One plane is hidden on the board. It occupies exactly 8 cells. Heading up, its shape is:
     . # .
     # # #
@@ -30,14 +30,17 @@ Board symbols:
 
 Each turn you will see the result of your last strike and the current board.
 Think about the board, then give exactly one cell to strike in your final answer, wrapped in triple backticks, for example ```C5```.
-""".replace("{max_steps}", str(env_lib.MAX_STEPS))
+""".replace("{max_steps}", str(env_lib.MAX_STEPS)).replace(
+    "{n}", str(env_lib.BOARD_SIZE)).replace("{last_col}", env_lib.COLUMNS[env_lib.BOARD_SIZE - 1])
 
 REMINDER = (
     "Do not strike a cell that has already been tried (marked X or O). "
     "Give your next strike as ```<cell>```."
 )
 
-_CELL_RE = re.compile(r"^\s*([A-Ha-h])\s*-?\s*([1-8])\s*$")
+_LAST_COL = env_lib.COLUMNS[env_lib.BOARD_SIZE - 1]
+_CELL_RE = re.compile(
+    rf"^\s*([A-{_LAST_COL}a-{_LAST_COL.lower()}])\s*-?\s*([1-{env_lib.BOARD_SIZE}])\s*$")
 _THOUGHT_END = "<channel|>"
 
 
