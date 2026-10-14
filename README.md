@@ -12,7 +12,7 @@ cells are hit), which should go down during training.
 
 | File | Purpose |
 |---|---|
-| `env.py` | `PlaneStrikeEnv(BaseTaskEnv)`: the original game on a 5x5 board instead of 8x8 (same plane placement code as `common.py`), capped at 16 strikes (`env.MAX_STEPS`). Logs every finished game to `games.jsonl`. |
+| `env.py` | `PlaneStrikeEnv(BaseTaskEnv)`: the original game on a 6x6 board instead of 8x8 (same plane placement code as `common.py`), capped at 23 strikes (`env.MAX_STEPS`). Logs every finished game to `games.jsonl`. |
 | `agent.py` | `PlaneStrikeAgent(ConversationAgentBase)`: system prompt (rules only), per-turn board message with the "don't strike tried cells" reminder, and strike parsing from the final answer (after the thought channel). |
 | `train_planestrike.py` | Agentic GRPO training (Tunix `GRPOLearner`, vLLM rollout, mesh (fsdp, tp) = (8, 1)). Boards are generated on the fly from seeds. |
 | `watchdog.py` | Runs training and restarts it on OOM / crash / hang (see below). |
@@ -24,12 +24,11 @@ cells are hit), which should go down during training.
 
 ## Game, observation, reward
 
-* Rules as in the original gym env, but on a **5x5 board** (was 8x8): one
-  8-cell plane in one of 4 headings (22 distinct placements), one strike per
-  turn; the game ends when all 8 cells are hit, or after **16 strikes** (the
-  original example has no cap). The plane covers 8 of 25 cells, so a random
-  policy over untried cells wins within 16 strikes only 2.8% of the time
-  (72% within 24). The results below are from the 8x8 game.
+* Rules as in the original gym env, but on a **6x6 board** (was 8x8): one
+  8-cell plane in one of 4 headings (45 distinct placements), one strike per
+  turn; the game ends when all 8 cells are hit, or after **23 strikes** (the
+  original example has no cap). The plane covers 8 of 36 cells; the cap is set
+  so that a random policy over untried cells wins only 2.8% of the time. The results below are from the 8x8 game.
 * Observation each turn: result of the last strike, strikes used, and the raw
   visible board (`.` untried, `X` hit, `O` miss). Nothing derived from the
   board (no candidate cells, no hit counts, no heat map / probabilities).
