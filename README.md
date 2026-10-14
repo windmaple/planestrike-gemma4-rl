@@ -1,12 +1,7 @@
 # Plane Strike with Gemma 4 E2B + agentic GRPO (Tunix)
 
-Replicates the TensorFlow blog post
-["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html)
-with an LLM agent: Gemma 4 E2B (thinking mode on) plays the game in a multi-turn
-conversation and is fine-tuned with GRPO in the style of
-`tunix/examples/frozenlake`. The metric is the same as the original
-`training_jax.py`: **raw game length** (number of strikes until all 8 plane
-cells are hit), which should go down during training.
+Agentic RL using the environment from a previous blog["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html) + an LLM agent, which uses Gemma 4 E2B (thinking mode on) to play the game in a multi-turn
+conversation and is fine-tuned with GRPO.
 
 ## Files
 
@@ -171,68 +166,5 @@ Per-step game stats are under `game/train/*` and `game/eval/*` (`length`,
 kept in `<run_dir>/wandb_id.txt`, so watchdog restarts resume the same run;
 steps replayed after a checkpoint resume are dropped by W&B (it requires
 increasing steps).
-
-## Results
-
-### Current run: 20-strike cap (`runs/grpo_turn20`)
-
-![game length](results/game_length_grpo_turn20.png)
-
-120 steps (8 boards x 8 games each), ~7.8k training games. Game length =
-strikes until all 8 plane cells are hit, capped at 20 (unfinished games count
-as 20). Repeat = re-striking a tried cell; invalid = no parseable strike
-(almost always a turn that hit the 2048-token cap).
-
-| policy | game length (95% CI) | win rate (<=20) | hits | repeat | invalid |
-|---|---|---|---|---|---|
-| random over untried cells (2000 games) | 20.00 | 0.0% | 2.51 | 0 | 0 |
-| Gemma 4 E2B before RL, standalone baseline (64 games) | 19.83 | 4.7% | 4.19 | 0.28 | 0.44 |
-| held-out eval boards, step 0 (64 games) | 19.75 +- 0.30 | 6% | 4.16 | 0.36 | 0.16 |
-| held-out eval boards, step 70 (best, 64 games) | **16.83 +- 0.64** | **72%** | 7.41 | 0.03 | 0.02 |
-| held-out eval boards, step 110 (last, 64 games) | 18.61 +- 0.45 | 50% | 7.00 | 0.36 | 0.09 |
-| train boards, steps 0-4 (320 games) | 19.82 +- 0.12 | 4% | 4.60 | 0.70 | 0.17 |
-| train boards, steps 65-74 (640 games) | 17.62 +- 0.21 | 56% | 6.65 | 0.05 | 0.06 |
-| train boards, steps 110-119 (640 games) | 18.33 +- 0.17 | 53% | 7.00 | 0.30 | 0.14 |
-
-Held-out eval every 10 steps (steps 0..110): 19.75, 19.53, 19.22, 18.39, 18.17,
-17.30, 17.33, 16.83, 17.84, 18.11, 18.64, 18.61.
-
-Game length fell steadily to ~17 by steps 50-70, then drifted back up to ~18.3-18.6
-over steps 70-100 (the eval rose three times in a row; training games 17.3 -> 17.9).
-Lowering lr to 1e-6 at step 100 stopped the drift but did not reverse it. Play
-stayed clean throughout (repeat/invalid < 0.4 per game; 2 of ~7.8k training games
-hit the token budget). With a 20-strike cap a game is only shorter than 20 if
-all 8 cells are found, so the metric moves mostly through the win rate.
-
-lr: `--lr_schedule 0:3e-6,40:5e-6,65:2.5e-6`, then 1e-6 from step 100
-(`runs/grpo_turn20/NOTES.txt`). Checkpoints kept: steps 95-120
-(`/dev/shm/planestrike/grpo_turn20/ckpt/actor/`, RAM disk); the best eval
-(step 70) was rotated out before `--max_to_keep` was raised to 6.
-
-### Previous run: 24-strike cap (artifacts deleted)
-
-120 steps. Held-out eval went from 22.59 strikes / 16% wins (step 0) to 17.61 /
-91% (steps 100 + 110); random 24.00 / 0%, pre-RL model 23.19 / 9.4%. lr 3e-6
-plateaued at ~20.6 from step 30; 5e-6 from step 40 reached ~18.5 but entropy
-collapsed (0.39 -> 0.13) over steps 65-78, so the run was rolled back to step 70
-and finished at 2.5e-6. That path was the default `--lr_schedule` until the
-cosine decay replaced it.
-
-### Previous run: 30-strike cap (artifacts deleted)
-
-Same code with `MAX_STEPS = 30`, stopped after step 100. Held-out eval went
-from 29.33 strikes / 11% wins (step 0) to 17.91 / 97% (step 100); random was
-30.00 / 0.2%, the pre-RL model 28.47 / 17%. Lessons that shaped the current
-defaults (all now built in):
-
-* Trajectory-level advantages barely learned (~29 -> 28.5 in 30 steps);
-  turn-level advantages (`turn_credit.py`) did.
-* An episode can overshoot the token budget by a few tokens; such trajectories
-  are trimmed (`clip_to_budget`) instead of crashing the job.
-* Games cut off by the token budget are charged for the strikes they never made.
-* After a checkpoint resume, Tunix had vLLM sampling from the base weights
-  until the first sync; restored weights are now pushed to vLLM at startup.
-* Around step 40 the policy started producing repetition-loop turns that later
-  turns copied; the per-turn cap is 2048 with a soft overlong penalty from 1024.
 * lr: 3e-6 plateaued at ~21 strikes; 5e-6 from step 65 reached ~18.5; lowered to
   2.5e-6 at step 90 when entropy fell (0.30 -> 0.25) and thinking grew (10k -> 19k tokens/game).
