@@ -145,6 +145,18 @@ OOM handling (`watchdog.py` + hooks in `train_planestrike.py`):
    orphaned), waits until the TPU is free, lowers `--vllm_hbm_utilization` by
    0.02 after an OOM, and restarts from the latest checkpoint.
 
+## Environment
+
+Tested with Python 3.12.13 on a TPU v6e-8 host:
+
+| package | version |
+|---|---|
+| Tunix | [`google/tunix@144717f`](https://github.com/google/tunix/commit/144717f073ebe5dfc28020e075f1b3ad9ab04db1) (2026-10-07), editable install (`google-tunix` 0.1.8) |
+| JAX / jaxlib | 0.11.0 |
+| Flax | 0.12.8 |
+| vLLM | 0.29.0 (`vllm-tpu`, with `tpu_inference` 0.29.0) |
+| libtpu | 0.0.44 |
+
 ## Running
 
 ```bash
