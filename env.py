@@ -44,7 +44,7 @@ REPEAT_STRIKE_REWARD = -1.0
 INVALID_ACTION_REWARD = -1.0
 STEP_COST = 0.5
 
-COLUMNS = "ABCDEFGH"
+COLUMNS = "ABCDEF"
 INVALID_ACTION = -1
 
 _SYMBOLS = {CELL_UNTRIED: ".", CELL_HIT: "X", CELL_MISS: "O"}
@@ -75,7 +75,7 @@ def initialize_random_hidden_board(rng: random.Random, board_size: int = BOARD_S
 
 def render_board(board: np.ndarray) -> str:
   """Renders the visible board as a labelled text grid."""
-  lines = ["   " + " ".join(COLUMNS[: board.shape[1]])]
+  lines = ["   " + " ".join(COLUMNS)]
   for r in range(board.shape[0]):
     lines.append(f"{r + 1:<2} " + " ".join(_SYMBOLS[int(v)] for v in board[r]))
   return "\n".join(lines)

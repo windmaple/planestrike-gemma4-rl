@@ -10,12 +10,10 @@ from tunix.rl.agentic.agents import base_agent
 import env as env_lib
 import strike_tool
 
-# Rules only: no strategy, no hints about the plane's geometry beyond its
-# definition, and nothing precomputed from the board.
-SYSTEM_PROMPT: str = """You are playing Plane Strike, a single-player board game.
+SYSTEM_PROMPT: str = f"""You are playing Plane Strike, a single-player board game.
 
 Rules:
-- The board is a {n}x{n} grid. Columns are labelled A-{last_col} and rows 1-{n}, so a cell is named like C5.
+- The board is a {env_lib.BOARD_SIZE}x{env_lib.BOARD_SIZE} grid. Columns are labelled A-{env_lib.COLUMNS[-1]} and rows 1-{env_lib.BOARD_SIZE}, so a cell is named like C5.
 - One plane is hidden on the board. It occupies exactly 8 cells. Heading up, its shape is:
     . # .
     # # #
@@ -23,7 +21,7 @@ Rules:
     # # #
   The hidden plane may be rotated to head up, down, left or right, and it lies fully inside the board.
 - Each turn you strike one cell. A strike on a plane cell is a HIT, otherwise it is a MISS.
-- The game is won when all 8 plane cells have been hit. You have at most {max_steps} strikes.
+- The game is won when all 8 plane cells have been hit. You have at most {env_lib.MAX_STEPS} strikes.
 - Striking a cell that has already been tried wastes the turn.
 - Your goal is to hit all 8 plane cells using as few strikes as possible.
 
@@ -32,17 +30,15 @@ Board symbols:
 
 After each strike you will see its result and the current board.
 Think about the board, then make your strike by calling the strike tool with exactly one cell, for example C5.
-""".replace("{max_steps}", str(env_lib.MAX_STEPS)).replace(
-    "{n}", str(env_lib.BOARD_SIZE)).replace("{last_col}", env_lib.COLUMNS[env_lib.BOARD_SIZE - 1])
+"""
 
 REMINDER = (
     "Do not strike a cell that has already been tried (marked X or O). "
     "Make your next strike with the strike tool."
 )
 
-_LAST_COL = env_lib.COLUMNS[env_lib.BOARD_SIZE - 1]
 _CELL_RE = re.compile(
-    rf"^\s*([A-{_LAST_COL}a-{_LAST_COL.lower()}])\s*-?\s*([1-{env_lib.BOARD_SIZE}])\s*$")
+    rf"^\s*([{env_lib.COLUMNS}])\s*-?\s*([1-{env_lib.BOARD_SIZE}])\s*$", re.IGNORECASE)
 _THOUGHT_END = "<channel|>"
 
 
