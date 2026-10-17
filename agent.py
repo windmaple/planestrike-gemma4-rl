@@ -1,4 +1,5 @@
-"""Plane Strike agent: renders board observations as chat turns and parses strikes."""
+"""Plane Strike agent: renders board observations as chat turns and turns the
+model's `strike` tool calls into env actions (see strike_tool.py)."""
 
 import re
 from typing import Any
@@ -7,6 +8,7 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 
 import env as env_lib
+import strike_tool
 
 # Rules only: no strategy, no hints about the plane's geometry beyond its
 # definition, and nothing precomputed from the board.
@@ -28,14 +30,14 @@ Rules:
 Board symbols:
 . untried cell | X hit | O miss
 
-Each turn you will see the result of your last strike and the current board.
-Think about the board, then give exactly one cell to strike in your final answer, wrapped in triple backticks, for example ```C5```.
+After each strike you will see its result and the current board.
+Think about the board, then make your strike by calling the strike tool with exactly one cell, for example C5.
 """.replace("{max_steps}", str(env_lib.MAX_STEPS)).replace(
     "{n}", str(env_lib.BOARD_SIZE)).replace("{last_col}", env_lib.COLUMNS[env_lib.BOARD_SIZE - 1])
 
 REMINDER = (
     "Do not strike a cell that has already been tried (marked X or O). "
-    "Give your next strike as ```<cell>```."
+    "Make your next strike with the strike tool."
 )
 
 _LAST_COL = env_lib.COLUMNS[env_lib.BOARD_SIZE - 1]
@@ -58,16 +60,22 @@ def format_observation(observation: dict[str, Any]) -> str:
   return "\n\n".join(parts)
 
 
-def parse_strike(response: str) -> int:
-  """Returns the struck cell index (row * 8 + col), or env.INVALID_ACTION."""
-  # Only the final answer counts, never cells mentioned while thinking. If the
-  # thought channel was opened but never closed, there is no final answer.
+def final_answer(response: str) -> str | None:
+  """The response after the thought channel; None if the thought never closed."""
+  # Only the final answer counts, never anything written while thinking.
   if _THOUGHT_END in response:
-    answer = response.rsplit(_THOUGHT_END, 1)[1]
-  elif "<|channel>" in response:
+    return response.rsplit(_THOUGHT_END, 1)[1]
+  if "<|channel>" in response:
+    return None
+  return response
+
+
+def parse_strike(response: str) -> int:
+  """Returns the struck cell index (row * BOARD_SIZE + col) from a ```<cell>```
+  in the final answer, or env.INVALID_ACTION."""
+  answer = final_answer(response)
+  if answer is None:
     return env_lib.INVALID_ACTION
-  else:
-    answer = response
   matches = re.findall(r"```(.*?)```", answer, re.DOTALL)
   if not matches:
     return env_lib.INVALID_ACTION
@@ -79,10 +87,24 @@ def parse_strike(response: str) -> int:
   return row * env_lib.BOARD_SIZE + col
 
 
+def tool_strike(response: str, tool: strike_tool.StrikeTool) -> int:
+  """The struck cell index if the final answer makes exactly one `strike` tool
+  call, else env.INVALID_ACTION (a ```C5``` written as text does not count)."""
+  answer = final_answer(response)
+  calls = [] if answer is None else strike_tool.parse_tool_calls(answer)
+  if len(calls) != 1 or calls[0][0] != tool.name or "cell" not in calls[0][1]:
+    return env_lib.INVALID_ACTION
+  return parse_strike(tool.apply(**calls[0][1]).output)
+
+
 class PlaneStrikeAgent(base_agent.ConversationAgentBase):
+
+  # Whether the last response ended waiting for a tool response.
+  _awaiting_tool_response = False
 
   def __init__(self, system_prompt: str | None = None, **kwargs):
     del system_prompt, kwargs  # Always uses the Plane Strike rules.
+    self.tool = strike_tool.StrikeTool()
     super().__init__(system_prompt=SYSTEM_PROMPT)
 
   def update_from_env(
@@ -101,10 +123,12 @@ class PlaneStrikeAgent(base_agent.ConversationAgentBase):
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]
   ) -> None:
     if not done:
-      self._messages.append({"role": "user", "content": str(observation)})
+      role = "tool" if self._awaiting_tool_response else "user"
+      self._messages.append({"role": role, "content": str(observation)})
 
   def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
-    action = parse_strike(response)
+    action = tool_strike(response, self.tool)
+    self._awaiting_tool_response = response.rstrip().endswith(strike_tool.TOOL_RESPONSE_START)
     self._messages.append({"role": "assistant", "content": response})
     self._trajectory.steps.append(self.cur_step)
     cur_step = self._trajectory.steps[-1]

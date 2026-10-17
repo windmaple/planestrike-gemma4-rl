@@ -101,7 +101,9 @@ arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=32768,
                         help="Token budget for a whole game after the first prompt.")
 arg_parser.add_argument("--max_tokens_per_turn", type=int, default=2048)
-arg_parser.add_argument("--soft_tokens_per_turn", type=int, default=1024,
+# 512 (was 1024): in grpo_6x6_tool_100, late-game turns over 700 tokens hit
+# half as often as short ones, and the long ones turned into repetition loops.
+arg_parser.add_argument("--soft_tokens_per_turn", type=int, default=512,
                         help="Turns longer than this get a linear penalty up to "
                         "--turn_length_penalty at --max_tokens_per_turn (0 disables).")
 arg_parser.add_argument("--turn_length_penalty", type=float, default=1.0)
@@ -172,7 +174,6 @@ from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import trainer as rl_trainer
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
-from tunix.rl.agentic.parser.chat_template_parser import parser as parser_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils as sft_utils
@@ -180,6 +181,7 @@ from tunix.sft import utils as sft_utils
 import agent as agent_lib
 import env as env_lib
 import memory_patches
+import strike_tool
 import turn_credit
 
 memory_patches.patch_chunked_mlp(args.mlp_chunk_size)
@@ -323,7 +325,8 @@ if args.freeze_ple:
 show_hbm_usage("after loading actor and reference")
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_VERSION)
-chat_parser = parser_lib.Gemma4ChatTemplateParser(tokenizer, enable_thinking=True)
+chat_parser = strike_tool.Gemma4ToolChatTemplateParser(
+    tokenizer, [strike_tool.StrikeTool()], enable_thinking=True)
 
 def make_learning_rate():
   # One optimizer update per board group, i.e. batch_size updates per training
@@ -335,7 +338,7 @@ def make_learning_rate():
     return optax.join_schedules(
         [optax.constant_schedule(args.learning_rate),
          optax.cosine_decay_schedule(
-             args.learning_rate, (args.num_steps - args.lr_decay_start) * args.batch_size,
+             args.learning_rate, max(1, args.num_steps - args.lr_decay_start) * args.batch_size,
              alpha=args.lr_end / args.learning_rate)],
         [decay_start])
   points = [(int(s), float(v)) for s, v in (p.split(":") for p in args.lr_schedule.split(","))]
@@ -358,6 +361,9 @@ rollout_config = base_rollout.RolloutConfig(
     top_p=1.0,
     top_k=0,
     return_logprobs=True,
+    # Gemma 4's stop tokens: <eos>, <turn|>, and <|tool_response> (after a tool call).
+    eos_tokens=[tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<turn|>"),
+                tokenizer.convert_tokens_to_ids(strike_tool.TOOL_RESPONSE_START)],
     rollout_vllm_model_version=MODEL_VERSION,
     rollout_vllm_hbm_utilization=args.vllm_hbm_utilization,
     rollout_vllm_tpu_backend_type="jax",

@@ -24,6 +24,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent as agent_lib  # pylint: disable=g-import-not-at-top
 import env as env_lib
+import strike_tool
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--policy", choices=["random", "model"], default="model")
@@ -78,12 +79,11 @@ def run_model():
   import transformers  # pylint: disable=g-import-not-at-top
   from tunix.generate import tokenizer_adapter
   from tunix.rl.agentic import utils as agentic_utils
-  from tunix.rl.agentic.parser.chat_template_parser import parser as parser_lib
   from vllm import LLM, SamplingParams
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(args.model)
-  chat_parser = parser_lib.Gemma4ChatTemplateParser(tokenizer, enable_thinking=True)
-  newline = chat_parser.newline_tokens
+  chat_parser = strike_tool.Gemma4ToolChatTemplateParser(
+      tokenizer, [strike_tool.StrikeTool()], enable_thinking=True)
   tok_adapter = tokenizer_adapter.TokenizerAdapter(tokenizer)
   llm = LLM(
       model=args.model_path or args.model,
@@ -97,7 +97,8 @@ def run_model():
                     "text_config": {"final_logit_softcapping": 30.0},
                     "architectures": ["Gemma4ForCausalLM"]},
   )
-  eos = [tokenizer.convert_tokens_to_ids("<turn|>"), tokenizer.eos_token_id]
+  eos = [tokenizer.convert_tokens_to_ids("<turn|>"), tokenizer.eos_token_id,
+         tokenizer.convert_tokens_to_ids(strike_tool.TOOL_RESPONSE_START)]
 
   games = []
   for g in range(args.num_games):
@@ -128,8 +129,9 @@ def run_model():
       gen = list(out.outputs[0].token_ids)
       response = tokenizer.decode(gen, skip_special_tokens=False)
       g["turn_tokens"].append(len(gen))
-      g["completion_tokens"] += len(gen) + len(newline)
-      g["ids"] += gen + newline
+      gen_with_suffix, _ = chat_parser.update_assistant_end_tokens(np.array(gen, dtype=np.int32))
+      g["completion_tokens"] += len(gen_with_suffix)
+      g["ids"] += [int(t) for t in gen_with_suffix]
       if len(g["sample"]) < 3 and g is games[0]:
         g["sample"].append(response)
       action = g["agent"].update_from_model(response).action

@@ -8,7 +8,8 @@ conversation and is fine-tuned with GRPO.
 | File | Purpose |
 |---|---|
 | `env.py` | `PlaneStrikeEnv(BaseTaskEnv)`: the original game on a 6x6 board instead of 8x8 (same plane placement code as `common.py`), capped at 23 strikes (`env.MAX_STEPS`). Logs every finished game to `games.jsonl`. |
-| `agent.py` | `PlaneStrikeAgent(ConversationAgentBase)`: system prompt (rules only), per-turn board message with the "don't strike tried cells" reminder, and strike parsing from the final answer (after the thought channel). |
+| `agent.py` | `PlaneStrikeAgent(ConversationAgentBase)`: system prompt (rules only), per-turn board message with the "don't strike tried cells" reminder, and turning the model's `strike` tool call (after the thought channel) into the env action. |
+| `strike_tool.py` | The `strike` tool (`BaseTool`: `strike(cell="C5")` returns ```` ```C5``` ````), Gemma 4 tool-call parsing, and a `Gemma4ChatTemplateParser` subclass that adds the native tool declaration and renders strike results as in-turn tool responses. |
 | `train_planestrike.py` | Agentic GRPO training (Tunix `GRPOLearner`, vLLM rollout, mesh (fsdp, tp) = (8, 1)). Boards are generated on the fly from seeds. |
 | `watchdog.py` | Runs training and restarts it on OOM / crash / hang (see below). |
 | `turn_credit.py` | Turn-level GRPO advantages (per-strike discounted returns, group-normalized), over-budget trimming, truncation penalty. |
@@ -28,8 +29,26 @@ conversation and is fine-tuned with GRPO.
   visible board (`.` untried, `X` hit, `O` miss). Nothing derived from the
   board (no candidate cells, no hit counts, no heat map / probabilities).
 * The system prompt states only the rules (board, the plane's shape and that
-  it can head 4 ways, symbols, answer format). No strategy and no hints about
-  symmetry. Each turn's message reminds the model not to strike tried cells.
+  it can head 4 ways, symbols, and that strikes are made with the `strike`
+  tool). No strategy and no hints about symmetry. Each turn's message reminds
+  the model not to strike tried cells.
+* Strikes are tool calls, in Gemma 4's native format: the system prompt carries
+  the tool's `<|tool>declaration:strike{...}<tool|>` (rendered by the model's
+  own chat template), and a turn ends with
+  `<|tool_call>call:strike{cell:<|"|>C5<|"|>}<tool_call|><|tool_response>`
+  (`<|tool_response>` is a Gemma 4 stop token). The tool only wraps the cell
+  in triple backticks; that output is parsed into the action. The strike result
+  and the new board come back as the tool response
+  (`response:strike{value:<|"|>...<|"|>}<tool_response|>`) and the model
+  continues in the same turn, so a game is one model turn with one tool call
+  per strike. A strike counts only if the final answer (after the thought)
+  makes exactly one `strike` call; a ```` ```C5``` ```` written as text, a
+  missing or second call, or an off-board cell is an invalid strike. After a
+  turn that ends with `<turn|>` instead, the board comes back as a user message.
+* Pre-RL baseline with the tool (32 held-out 6x6 games,
+  `results/baseline_tool_6x6.jsonl`): game length 22.44, win rate 9.4%,
+  6.22 hits, 0.84 repeats and 0.84 invalid strikes per game; 255 tokens per
+  turn (p99 1.5k), 8.3k tokens per game (max 11.8k), no truncated games.
 * Per-strike reward: hit +1, miss 0, repeated cell -1, unparseable answer -1,
   and -0.5 per strike. The trajectory reward is the sum, i.e.
   `hits - 0.5 * game_length - repeats - invalid`. Every unfinished game has
@@ -76,7 +95,13 @@ Settings:
   step 45 the cap is 2048, so a loop wastes half as much context.
 * Per-turn soft overlong penalty (`--soft_tokens_per_turn`, DAPO-style): 0 up
   to the soft limit, then linear to -1 at the per-turn cap (1536/4096 from step
-  40, 1024/2048 from step 45).
+  40, 1024/2048 from step 45 in the 8x8 runs; 512/2048 now). In
+  `grpo_6x6_tool_100` (soft limit 1024), performance peaked around step 60 and
+  then degraded: late-game turns (turn >= 15, usually 7 hits with the last cell
+  unresolved) grew from ~350 to ~600 tokens and 15.6% of them looped until the
+  2048 cap by steps 80-99, and later turns copied the loops. Late turns over 700
+  tokens hit 12-13% of the time vs 26% under 300, so long turns are penalized
+  from 512.
 * `episode_timeout = 6h` (Tunix default 30 min could cut long games under load).
 * Clipped games are logged with `"truncated": true` in `games.jsonl` and are
   counted as the cap (not finished) in plots and summaries.
@@ -161,14 +186,24 @@ python baseline_eval.py --policy model --num_games 64 --out results/baseline_gem
 
 # Training (background, auto-restart; resumes from the latest checkpoint).
 # Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
-# 1024, lr 3e-6 held to step 40 then cosine decay to 3e-7 at --num_steps
+# 512, lr 3e-6 held to step 40 then cosine decay to 3e-7 at --num_steps
 # (--lr_decay, --lr_decay_start, --lr_end; --lr_schedule for piecewise constant).
-setsid nohup python watchdog.py --run_dir runs/grpo_turn20_70 -- --num_steps 70 --max_to_keep 4 > logs/grpo_turn20_70_watchdog.log 2>&1 &
-# Stop: kill <watchdog_pid from runs/grpo_turn20_70/watchdog_status.json>
+#
+# Current recipe (6x6 board, 23-strike cap, strike tool): lr 2e-6 held to step
+# 40, then cosine decay to 2e-7 over a 100-step schedule; stopped after step 75
+# and the step-75 checkpoint used (/dev/shm/planestrike/<run>/ckpt/actor/75).
+# Keep --num_steps 100: the lr schedule is computed from it, so --num_steps 75
+# would decay faster and give a different model.
+setsid nohup python watchdog.py --run_dir runs/grpo_6x6_tool_soft512_100 -- --num_steps 100 --max_to_keep 4 --learning_rate 2e-6 --lr_end 2e-7 > logs/grpo_6x6_tool_soft512_100_watchdog.log 2>&1 &
+# Stop (after checkpoint 75 is written, i.e. once step 76 starts):
+#   kill <watchdog_pid from runs/grpo_6x6_tool_soft512_100/watchdog_status.json>
+# Result (runs/grpo_6x6_tool_soft512_100): held-out eval 15.73 strikes / 100% wins
+# at step 70 and 15.28 / 100% at step 80 (step 0: 21.25 / 22%); train steps 70-79
+# 14.80 strikes, 99% wins, 0.05 repeats and 0.02 invalid strikes per game.
 
 # Plot + per-step summary table
-.plotenv/bin/python plot_game_length.py --run_dir runs/grpo_turn20_70
-tensorboard --logdir runs/grpo_turn20_70/tensorboard   # games/train/game_length
+.plotenv/bin/python plot_game_length.py --run_dir runs/grpo_6x6_tool_soft512_100
+tensorboard --logdir runs/grpo_6x6_tool_soft512_100/tensorboard   # games/train/game_length
 ```
 
 Metrics also go to W&B (project `planestrike`, `--wandb_project`) whenever
