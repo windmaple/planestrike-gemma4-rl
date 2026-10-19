@@ -101,7 +101,13 @@ class PlaneStrikeAgent(base_agent.ConversationAgentBase):
   def __init__(self, system_prompt: str | None = None, **kwargs):
     del system_prompt, kwargs  # Always uses the Plane Strike rules.
     self.tool = strike_tool.StrikeTool()
+    # Number of tool calls in each turn's final answer (a strike needs exactly 1).
+    self.tool_calls_per_turn: list[int] = []
     super().__init__(system_prompt=SYSTEM_PROMPT)
+
+  def reset(self) -> None:
+    super().reset()
+    self.tool_calls_per_turn = []
 
   def update_from_env(
       self,
@@ -124,6 +130,9 @@ class PlaneStrikeAgent(base_agent.ConversationAgentBase):
 
   def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
     action = tool_strike(response, self.tool)
+    answer = final_answer(response)
+    self.tool_calls_per_turn.append(
+        0 if answer is None else len(strike_tool.parse_tool_calls(answer)))
     self._awaiting_tool_response = response.rstrip().endswith(strike_tool.TOOL_RESPONSE_START)
     self._messages.append({"role": "assistant", "content": response})
     self._trajectory.steps.append(self.cur_step)

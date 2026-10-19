@@ -23,8 +23,8 @@ from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 
 class StepInfoEngine(trajectory_collect_engine.TrajectoryCollectEngine):
-  """Adds per-turn rewards, token spans and the env's game record (if any) to
-  the "Token" trajectory dict."""
+  """Adds per-turn rewards, token spans, tool-call counts and the env's game
+  record (if any) to the "Token" trajectory dict."""
 
   async def collect(self, mode: str = "Conversation") -> Any:
     out = await super().collect(mode)
@@ -38,6 +38,7 @@ class StepInfoEngine(trajectory_collect_engine.TrajectoryCollectEngine):
       ]
       # env.close() runs inside collect(), so the record is final here.
       out["game_record"] = getattr(self.env, "game_record", None)
+      out["tool_calls_per_turn"] = list(getattr(self.agent, "tool_calls_per_turn", []))
     return out
 
 

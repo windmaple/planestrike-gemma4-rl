@@ -289,7 +289,17 @@ class PlaneStrikeGRPOLearner(_LearnerBase):
               "game/hits": (float(np.mean([g["hits"] for g in games])), np.mean),
               "game/repeats": (float(np.mean([g["repeats"] for g in games])), np.mean),
               "game/invalid": (float(np.mean([g["invalid"] for g in games])), np.mean),
-              "game/truncated": (float(np.mean([g["truncated"] for g in games])), np.mean),
+          },
+          mode=mode, step=expected_step)
+    calls = [item.traj.get("tool_calls_per_turn") for item in trajectories]
+    calls = [c for c in calls if c]
+    if calls:
+      # Tool calls made per game, and the share of turns whose final answer
+      # made exactly one call (the only way to strike).
+      self.rl_engine.buffer_metrics_async(
+          {
+              "game/tool_calls": (float(np.mean([sum(c) for c in calls])), np.mean),
+              "game/tool_call_rate": (float(np.mean([n == 1 for c in calls for n in c])), np.mean),
           },
           mode=mode, step=expected_step)
     for item in trajectories:

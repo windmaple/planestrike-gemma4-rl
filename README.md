@@ -113,11 +113,11 @@ Tested with Python 3.12.13 on a TPU v6e-8 host:
 ## Running
 
 ```bash
-# Train for 70 steps (default --num_steps 70; resumes from the latest checkpoint if present).
+# Train for 50 steps (default --num_steps 50; resumes from the latest checkpoint if present).
 # Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
 # 512, lr held to step 40 then cosine decay to --lr_end at --num_steps.
 python train_planestrike.py \
-  --run_dir runs/grpo_6x6_tool_soft512_70 \
+  --run_dir runs/grpo_6x6_tool_soft512_50 \
   --learning_rate 2e-6 \
   --lr_end 2e-7
 ```
@@ -125,5 +125,6 @@ python train_planestrike.py \
 Metrics are logged to W&B (project `planestrike`, `--wandb_project`) whenever
 `wandb` is installed and logged in; set `WANDB_MODE=disabled` to turn it off.
 Per-step game stats are logged under `game/train/*` and `game/eval/*` (`length`,
-`win_rate`, `hits`, `repeats`, `invalid`, `truncated`). The W&B run id is
-saved in `<run_dir>/wandb_id.txt` so resuming a run continues the same W&B run.
+`win_rate`, `hits`, `repeats`, `invalid`, and `tool_calls`: strike tool calls
+per game, `tool_call_rate`: share of turns making exactly one call). The W&B
+run id is saved in `<run_dir>/wandb_id.txt` so resuming a run continues the same W&B run.
