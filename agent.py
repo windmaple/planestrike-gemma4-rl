@@ -66,13 +66,10 @@ def final_answer(response: str) -> str | None:
   return response
 
 
-def parse_strike(response: str) -> int:
-  """Returns the struck cell index (row * BOARD_SIZE + col) from a ```<cell>```
-  in the final answer, or env.INVALID_ACTION."""
-  answer = final_answer(response)
-  if answer is None:
-    return env_lib.INVALID_ACTION
-  matches = re.findall(r"```(.*?)```", answer, re.DOTALL)
+def parse_strike(tool_output: str) -> int:
+  """Returns the struck cell index (row * BOARD_SIZE + col) from the strike
+  tool's ```<cell>``` output, or env.INVALID_ACTION."""
+  matches = re.findall(r"```(.*?)```", tool_output, re.DOTALL)
   if not matches:
     return env_lib.INVALID_ACTION
   m = _CELL_RE.match(matches[-1])
@@ -136,9 +133,7 @@ class PlaneStrikeAgent(base_agent.ConversationAgentBase):
     self._awaiting_tool_response = response.rstrip().endswith(strike_tool.TOOL_RESPONSE_START)
     self._messages.append({"role": "assistant", "content": response})
     self._trajectory.steps.append(self.cur_step)
-    cur_step = self._trajectory.steps[-1]
-    cur_step.thought = response
-    cur_step.action = action
-    cur_step.model_response = response
+    self.cur_step.action = action
+    self.cur_step.model_response = response
     self.step += 1
     return agent_types.Action(action=action)

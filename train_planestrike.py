@@ -1,64 +1,12 @@
-"""Agentic GRPO on Plane Strike with Gemma 4 E2B (thinking mode) on one TPU host.
-
-Follows tunix/examples/frozenlake/train_frozenlake.py. Differences:
-  * Boards are generated on the fly from integer seeds (no data files).
-  * Thinking mode is on; every turn's thinking stays in the trajectory, and
-    later turns replay the recorded token ids (exact_token_continuity) so the
-    sampler and the trainer see the same sequence.
-  * Context budget, per-turn cap and episode timeout are sized so that a
-    full game is not clipped (see README.md).
-  * Every finished game is appended to <run_dir>/games.jsonl and logged to
-    TensorBoard as `game_length`, like the original training_jax.py. Per-step
-    game stats (`game/*`) also go through Tunix's metrics logger (TensorBoard
-    and W&B).
-  * Uncaught exceptions in any thread hard-exit the process (exit code 42 for
-    OOM) so that a crashed vLLM/trainer thread cannot leave the job hanging;
-    watchdog.py restarts it from the latest checkpoint.
-"""
+"""Agentic GRPO on Plane Strike with Gemma 4 E2B (thinking mode) on TPU v6e-8."""
 
 import argparse
-import faulthandler
+import functools
 import json
 import logging
-import math
 import os
-import re
 import sys
-import threading
 import time
-import traceback
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-OOM_EXIT_CODE = 42
-_OOM_RE = re.compile(
-    r"RESOURCE_EXHAUSTED|[Oo]ut of memory|OutOfMemory|Ran out of memory|"
-    r"memory limit exceeded|Attempting to allocate"
-)
-
-
-_FATAL_DIR = None  # Set to <run_dir>/logs once args are parsed.
-
-
-def _hard_exit_on_error(exc_type, exc, tb, where):
-  text = "".join(traceback.format_exception(exc_type, exc, tb))
-  code = OOM_EXIT_CODE if _OOM_RE.search(text) else 1
-  msg = f"\n[fatal] uncaught exception in {where}:\n{text}\n[fatal] exiting with code {code}\n"
-  # Write to fd 2 directly: libraries may have replaced sys.stderr.
-  os.write(2, msg.encode(errors="replace"))
-  if _FATAL_DIR:
-    with open(os.path.join(_FATAL_DIR, f"fatal_{os.getpid()}.txt"), "w") as f:
-      f.write(msg)
-  os._exit(code)  # pylint: disable=protected-access
-
-
-sys.excepthook = lambda t, e, tb: _hard_exit_on_error(t, e, tb, "main thread")
-threading.excepthook = lambda a: (
-    None if a.exc_type is SystemExit
-    else _hard_exit_on_error(a.exc_type, a.exc_value, a.exc_traceback,
-                             f"thread {a.thread.name if a.thread else '?'}")
-)
-faulthandler.enable()
 
 arg_parser = argparse.ArgumentParser(description=__doc__)
 arg_parser.add_argument("--run_dir", required=True)
@@ -68,18 +16,11 @@ arg_parser.add_argument("--ckpt_dir", default="",
 arg_parser.add_argument("--num_steps", type=int, default=70)
 arg_parser.add_argument("--batch_size", type=int, default=8, help="Boards per step.")
 arg_parser.add_argument("--num_generations", type=int, default=8, help="Games per board.")
-# Tunix applies an optimizer update after every micro-batch (one board's group
-# of games), i.e. batch_size updates per step, as in the frozenlake recipe.
 arg_parser.add_argument("--learning_rate", type=float, default=3e-6,
                         help="Peak lr, held until --lr_decay_start.")
-# Default: hold 3e-6, then cosine decay to --lr_end at --num_steps. At a
-# 24-strike cap, 3e-6 improved steadily to step ~40; raising it to 5e-6 there
-# gave the best eval at step 50 and then a regression (18.7 -> 21.2 strikes).
 arg_parser.add_argument("--lr_decay", default="cosine", choices=["cosine", "none"])
 arg_parser.add_argument("--lr_decay_start", type=int, default=40, help="Training step.")
 arg_parser.add_argument("--lr_end", type=float, default=3e-7)
-# "step:lr,step:lr,..." in training steps; the first entry must be step 0.
-# Overrides the above when set (previous default: "0:3e-6,40:5e-6,65:2.5e-6").
 arg_parser.add_argument("--lr_schedule", default="")
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
@@ -101,17 +42,12 @@ arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=32768,
                         help="Token budget for a whole game after the first prompt.")
 arg_parser.add_argument("--max_tokens_per_turn", type=int, default=2048)
-# 512 (was 1024): in grpo_6x6_tool_100, late-game turns over 700 tokens hit
-# half as often as short ones, and the long ones turned into repetition loops.
 arg_parser.add_argument("--soft_tokens_per_turn", type=int, default=512,
                         help="Turns longer than this get a linear penalty up to "
                         "--turn_length_penalty at --max_tokens_per_turn (0 disables).")
 arg_parser.add_argument("--turn_length_penalty", type=float, default=1.0)
 arg_parser.add_argument("--episode_timeout", type=float, default=6 * 3600)
 arg_parser.add_argument("--vllm_hbm_utilization", type=float, default=0.23)
-# Games in flight. Must fit their contexts in vLLM's KV cache (~13k tokens at
-# the end of a game; ~255k tokens at --vllm_hbm_utilization 0.23); beyond that
-# vLLM evicts prefix-cached histories and re-prefills them every turn.
 arg_parser.add_argument("--max_concurrency", type=int, default=24)
 arg_parser.add_argument("--vllm_max_num_seqs", type=int, default=64)
 arg_parser.add_argument("--vllm_max_batched_tokens", type=int, default=8192)
@@ -120,24 +56,21 @@ arg_parser.add_argument("--compute_logps_chunk_size", type=int, default=1024)
 arg_parser.add_argument("--latency_hiding_scheduler_off", default="train_step",
                         choices=["train_step", "global", "none"])
 arg_parser.add_argument("--freeze_ple", type=int, default=1,
-                        help="Freeze the 2.35B-param per-layer embedding table; see memory_patches.py.")
+                        help="Freeze the 2.35B-param per-layer embedding table (memory patch).")
 arg_parser.add_argument("--mlp_chunk_size", type=int, default=2048,
-                        help="Sequence chunk for the MLP under remat; see memory_patches.py.")
+                        help="Sequence chunk for the MLP under remat (memory patch).")
 arg_parser.add_argument("--eval_every", type=int, default=10)
 arg_parser.add_argument("--num_eval_boards", type=int, default=8)
 arg_parser.add_argument("--save_every", type=int, default=5)
 arg_parser.add_argument("--max_to_keep", type=int, default=2,
                         help="Checkpoints kept in /dev/shm (~27 GB each).")
 arg_parser.add_argument("--seed", type=int, default=42)
-# Tunix logs to W&B whenever `wandb` is importable (set WANDB_MODE=disabled to
-# turn it off). The run id is kept in <run_dir>/wandb_id.txt so watchdog
-# restarts resume the same W&B run.
 arg_parser.add_argument("--wandb_project", default="planestrike")
 args, _ = arg_parser.parse_known_args()
 
 # XLA's latency-hiding scheduler overlaps layers in the train step and keeps
 # many layers' activations alive: 28.6 GB of temporaries per chip at 34k tokens
-# vs 17.4 GB without it (mem_probe_trainstep.py). "train_step" turns it off only
+# vs 17.4 GB without it. "train_step" turns it off only
 # for the trainer's jitted step (vLLM keeps it); "global" for the whole process.
 if args.latency_hiding_scheduler_off == "global":
   os.environ["LIBTPU_INIT_ARGS"] = (
@@ -148,8 +81,6 @@ os.makedirs(args.run_dir, exist_ok=True)
 RUN_NAME = os.path.basename(os.path.normpath(args.run_dir))
 CKPT_DIR = args.ckpt_dir or f"/dev/shm/planestrike/{RUN_NAME}/ckpt"
 TB_DIR = os.path.join(args.run_dir, "tensorboard")
-_FATAL_DIR = os.path.join(args.run_dir, "logs")
-os.makedirs(_FATAL_DIR, exist_ok=True)
 
 logging.basicConfig(
     stream=sys.stdout, level=logging.INFO, force=True,
@@ -180,20 +111,15 @@ from tunix.sft import utils as sft_utils
 
 import agent as agent_lib
 import env as env_lib
-import memory_patches
 import strike_tool
 import turn_credit
 
-memory_patches.patch_chunked_mlp(args.mlp_chunk_size)
-if args.latency_hiding_scheduler_off == "train_step":
-  memory_patches.compile_train_step_with_options(
-      rl_trainer.Trainer, {"xla_tpu_enable_latency_hiding_scheduler": False})
 
 print("jax devices:", jax.devices())
 MODEL_VERSION = "google/gemma-4-E2B-it"
 MESH_SHAPE = (8, 1)  # (fsdp, tp) for actor, reference and rollout.
 MESH_AXIS_NAMES = ("fsdp", "tp")
-EVAL_SEED_OFFSET = 10_000_000  # Same held-out boards as baseline_eval.py.
+EVAL_SEED_OFFSET = 10_000_000  # Held-out eval boards.
 TRAIN_SEED_OFFSET = 1_000_000 * (1 + args.seed)
 
 
@@ -217,14 +143,6 @@ def log_game_to_tensorboard(record):
 
 
 env_lib.GameLogger.path = GAMES_PATH
-ATTEMPT = int(os.environ.get("WATCHDOG_ATTEMPT", "0"))
-
-
-def tag_attempt(record):
-  record["attempt"] = ATTEMPT
-
-
-env_lib.GameLogger.listeners.insert(0, tag_attempt)
 env_lib.GameLogger.listeners.append(log_game_to_tensorboard)
 
 
@@ -280,7 +198,7 @@ class PlaneStrikeGRPOLearner(_LearnerBase):
     games = [item.traj.get("game_record") for item in trajectories]
     games = [g for g in games if g]
     if games:
-      # A truncated game counts as the cap, as in plot_game_length.py.
+      # A truncated game counts as the cap.
       lengths = [g["max_steps"] if g["truncated"] else g["game_length"] for g in games]
       self.rl_engine.buffer_metrics_async(
           {
@@ -330,8 +248,6 @@ reference = (params_lib.create_model_from_safe_tensors(model_dir, config, mesh, 
              if args.beta > 0 else None)
 # fp32 actor storage: bf16 would round lr~1e-6 Adam updates away.
 actor = params_lib.create_model_from_safe_tensors(model_dir, config, mesh, dtype=jnp.float32)
-if args.freeze_ple:
-  memory_patches.freeze_per_layer_embedding(actor)
 show_hbm_usage("after loading actor and reference")
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_VERSION)
@@ -456,6 +372,84 @@ grpo_config = GRPOConfig(
     overlong_filter=False,
     exact_token_continuity=True,
 )
+
+# ====== Memory patches ======
+# Runtime patches so 34k-token sequences fit in HBM without modifying Tunix:
+# sequence-chunked MLP under remat, frozen per-layer embedding table, and XLA
+# options for the train step only.
+_original_block = model_lib.FeedForward.block
+
+
+def patch_chunked_mlp(chunk_size: int) -> None:
+  if chunk_size <= 0:
+    return
+
+  def chunked_block(self, x):
+    *lead, seq_len, dim = x.shape
+    if seq_len <= chunk_size:
+      return _original_block(self, x)
+    pad = (-seq_len) % chunk_size
+    xp = jnp.pad(x, [(0, 0)] * len(lead) + [(0, pad), (0, 0)])
+    n = xp.shape[-2] // chunk_size
+    xc = jnp.moveaxis(xp.reshape(*lead, n, chunk_size, dim), -3, 0)
+    graphdef, state = nnx.split(self)
+
+    @jax.checkpoint
+    def one_chunk(state, chunk):
+      return _original_block(nnx.merge(graphdef, state), chunk)
+
+    _, yc = jax.lax.scan(lambda c, chunk: (c, one_chunk(state, chunk)), None, xc)
+    y = jnp.moveaxis(yc, 0, -3).reshape(*lead, n * chunk_size, -1)
+    return y[..., :seq_len, :]
+
+  model_lib.FeedForward.block = chunked_block
+
+
+class FrozenParam(nnx.Variable):
+  """A model weight that is not trained (not an nnx.Param)."""
+
+
+def freeze_per_layer_embedding(model, dtype=jnp.bfloat16) -> None:
+  embedder = model.embedder
+  var = embedder.per_layer_input_embedding
+  value = var[...]
+  sharding = value.sharding
+  with jax.set_mesh(sharding.mesh):
+    # The released checkpoint is bf16, so the bf16 copy is exact.
+    frozen = FrozenParam(value.astype(dtype), **var.get_metadata())
+  assert frozen[...].sharding.is_equivalent_to(sharding, value.ndim), frozen[...].sharding
+  embedder.per_layer_input_embedding = frozen
+
+
+def compile_train_step_with_options(trainer_cls, compiler_options: dict) -> None:
+  """Passes XLA `compiler_options` to the jax.jit behind the trainer's train/eval steps.
+
+  Lets the train step be compiled without the latency-hiding scheduler (which
+  keeps many layers' activations alive) while vLLM's programs keep it.
+  nnx.jit has no compiler_options argument, so jax.jit is wrapped only while
+  `jit_train_and_eval_step` builds the jitted functions.
+  """
+  original = trainer_cls.jit_train_and_eval_step
+
+  def wrapped(self, *args, **kwargs):
+    real_jit = jax.jit
+    jax.jit = functools.partial(real_jit, compiler_options=compiler_options)
+    try:
+      return original(self, *args, **kwargs)
+    finally:
+      jax.jit = real_jit
+
+  trainer_cls.jit_train_and_eval_step = wrapped
+
+
+# Applied before RLEngine creation: the optimizer state is built for the actor's
+# nnx.Params then, and the train step is compiled during learner.train().
+if args.freeze_ple:
+  freeze_per_layer_embedding(actor)
+patch_chunked_mlp(args.mlp_chunk_size)
+if args.latency_hiding_scheduler_off == "train_step":
+  compile_train_step_with_options(
+      rl_trainer.Trainer, {"xla_tpu_enable_latency_hiding_scheduler": False})
 
 rl_engine = rl_engine_lib.RLEngine(
     actor=actor, reference=reference, tokenizer=tokenizer, cluster_config=cluster_config)

@@ -1,8 +1,8 @@
 """Plane Strike environment for agentic GRPO.
 
 Game rules follow the TensorFlow Lite Plane Strike example
-(tensorflow/examples lite/examples/reinforcement_learning/ml), on a 6x6 board
-instead of 8x8: one plane occupying 8 cells hides in one of 4 headings. The agent strikes one
+(tensorflow/examples lite/examples/reinforcement_learning/ml), on a 6x6 board: 
+one plane occupying 8 cells hides in one of 4 headings. The agent strikes one
 cell per turn; the game ends when all 8 plane cells are hit, or after
 `max_steps` strikes.
 
@@ -12,7 +12,6 @@ added.
 """
 
 import json
-import os
 import random
 import threading
 from typing import Any
@@ -22,8 +21,6 @@ from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepR
 
 BOARD_SIZE = 6
 PLANE_SIZE = 8
-# The plane covers 8 of 36 cells. A random policy over untried cells finishes
-# within 23 strikes 2.8% of the time (within 24: 3.9%, within 30: 23%).
 MAX_STEPS = 23
 
 # Hidden board cell status.
@@ -95,7 +92,7 @@ class GameLogger:
   @classmethod
   def log(cls, record: dict[str, Any]) -> None:
     with cls._lock:
-      for listener in cls.listeners:  # May add fields (e.g. attempt).
+      for listener in cls.listeners:
         listener(record)
       if cls.path:
         with open(cls.path, "a") as f:
@@ -134,7 +131,6 @@ class PlaneStrikeEnv(BaseTaskEnv):
     self.hit_count = 0
     self.num_repeats = 0
     self.num_invalid = 0
-    self.strikes: list[int] = []
     self.total_reward = 0.0
     self._logged = False
     self.game_record: dict[str, Any] | None = None
@@ -157,7 +153,6 @@ class PlaneStrikeEnv(BaseTaskEnv):
       self.num_invalid += 1
       reward, result = INVALID_ACTION_REWARD, "INVALID (no valid target cell was given)"
     else:
-      self.strikes.append(action)
       r, c = divmod(action, BOARD_SIZE)
       name = cell_name(action)
       if self.board[r][c] != CELL_UNTRIED:
@@ -180,7 +175,7 @@ class PlaneStrikeEnv(BaseTaskEnv):
         observation=self._observation(result),
         reward=reward,
         done=won,
-        info={"hit_count": self.hit_count, "won": won},
+        info={"won": won},
     )
 
   def close(self) -> None:

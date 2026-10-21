@@ -65,9 +65,7 @@ def penalize_truncation(traj: dict, max_steps: int, step_cost: float) -> float:
   Returns the penalty applied (0 if the game ended normally)."""
   if traj.get("status") in ("SUCCEEDED", "MAX_STEPS_REACHED") or traj.get("truncation_penalty"):
     return 0.0
-  rewards = traj.get("step_rewards")
-  if rewards is None:  # Needs StepInfoEngine (--advantage_mode turn).
-    return 0.0
+  rewards = traj["step_rewards"]
   n = len(rewards)
   # A finished game (all 8 hits) ends with status SUCCEEDED; MAX_STEPS_REACHED
   # is the strike cap. Anything else ended early.
@@ -85,7 +83,7 @@ def penalize_long_turns(traj: dict, soft_tokens: int, hard_tokens: int,
   tokens, growing linearly to -max_penalty at `hard_tokens` (the per-turn cap).
   Keeps whole games inside the context budget without shrinking it. Returns the
   total penalty added."""
-  if traj.get("length_penalty") is not None or traj.get("step_rewards") is None:
+  if traj.get("length_penalty") is not None:
     return 0.0
   total = 0.0
   for t, (n_assistant, _) in enumerate(traj["step_token_spans"]):
