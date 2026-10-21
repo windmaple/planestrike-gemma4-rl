@@ -1,7 +1,38 @@
-# Plane Strike with Gemma 4 E2B + agentic GRPO (Tunix)
+# Plane Strike with Gemma 4 E2B + agentic RL (Tunix)
 
 Agentic RL using the environment from a previous blog["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html) + an LLM agent, which uses Gemma 4 E2B (thinking mode on) to play the game in a multi-turn
 conversation and is fine-tuned with GRPO.
+
+## Sample run
+
+Train metrics of a 100-step run with the defaults below: win rate 0.17 -> 0.95,
+game length 22 -> ~15.7 strikes, repeats and invalid strikes down to ~0.
+
+![Train metrics of a 100-step run: win rate, tool calls, game length, tool-call rate, repeats and invalid strikes per step](sample_run.png)
+
+## Running
+
+```bash
+# Train for 100 steps (default --num_steps 100; resumes from the latest checkpoint if present).
+# Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
+# 512, lr held to step 40 then cosine decay to --lr_end at --num_steps.
+python train_planestrike.py \
+  --run_dir runs/grpo_6x6_tool_soft512_100 \
+  --learning_rate 2e-6 \
+  --lr_end 2e-7
+```
+
+## Tested nvironment
+
+TPU v6e-8 single host with Python 3.12:
+
+| package | version |
+|---|---|
+| Tunix | [`google/tunix@144717f`](https://github.com/google/tunix/commit/144717f073ebe5dfc28020e075f1b3ad9ab04db1) (2026-10-07) |
+| JAX / jaxlib | 0.11.0 |
+| Flax | 0.12.8 |
+| vLLM | 0.29.0 (`vllm-tpu`, with `tpu_inference` 0.29.0) |
+| libtpu | 0.0.44 |
 
 ## Files
 
@@ -15,11 +46,10 @@ conversation and is fine-tuned with GRPO.
 
 ## Game, observation, reward
 
-* Rules as in the original gym env, but on a **6x6 board** (was 8x8): one
+* Rules as in the original gym env, but on a **6x6 board**: one
   8-cell plane in one of 4 headings (45 distinct placements), one strike per
-  turn; the game ends when all 8 cells are hit, or after **23 strikes** (the
-  original example has no cap). The plane covers 8 of 36 cells; the cap is set
-  so that a random policy over untried cells wins only 2.8% of the time.
+  turn; the game ends when all 8 cells are hit, or after **23 strikes**. 
+  The plane covers 8 of 36 cells.
 * Observation each turn: result of the last strike, strikes used, and the raw
   visible board (`.` untried, `X` hit, `O` miss). Nothing derived from the
   board (no candidate cells, no hit counts, no heat map / probabilities).
@@ -68,62 +98,5 @@ and every token generated in turn t gets `A_t` (Tunix's loss already accepts
 `[batch, length]` advantages). Selected with `--advantage_mode turn` (default);
 `--advantage_mode trajectory` is the stock behavior.
 
-## Context budget (no clipping)
-
-Thinking is kept in the conversation (Tunix's Gemma 4 parser does not strip
-past thoughts), and later turns replay the recorded token ids
-(`exact_token_continuity=True`), so the sampler and the trainer see the same
-sequence.
-
-Settings:
-
-* `max_response_length = 32768` (whole game after the 424-token first prompt): about 2x the longest normal game.
-* `max_tokens_per_turn = 2048`: a runaway thought loses one turn (invalid strike)
-  instead of clipping the rest of the game.
-* Per-turn soft overlong penalty (`--soft_tokens_per_turn 512`, DAPO-style): 0 up
-  to the soft limit, then linear to -1 at the per-turn cap (2048). In earlier
-  runs with soft limit 1024, late-game turns (turn >= 15, usually 7 hits with
-  the last cell unresolved) grew from ~350 to ~600 tokens and looped until the
-  2048 cap, and later turns copied the loops. Late turns over 700 tokens hit
-  12-13% of the time vs 26% under 300, so long turns are penalized from 512.
-* `episode_timeout = 6h` (Tunix default 30 min could cut long games under load).
-* Clipped games are marked `"truncated": true` and counted as the cap (`max_steps`)
-  in logged `game/length` metrics.
-* A game cut off by the token budget is charged `-0.5` per strike it never
-  made (as if they all missed), on its last turn, so the policy learns to stay
-  within budget instead of the budget being shrunk.
-* The final turn can overshoot the budget by a few tokens (appended suffix);
-  Tunix's exact-token path raises on that, so such trajectories are trimmed to
-  the budget first (`turn_credit.clip_to_budget`).
 
 
-## Environment
-
-Tested with Python 3.12.13 on a TPU v6e-8 host:
-
-| package | version |
-|---|---|
-| Tunix | [`google/tunix@144717f`](https://github.com/google/tunix/commit/144717f073ebe5dfc28020e075f1b3ad9ab04db1) (2026-10-07), editable install (`google-tunix` 0.1.8) |
-| JAX / jaxlib | 0.11.0 |
-| Flax | 0.12.8 |
-| vLLM | 0.29.0 (`vllm-tpu`, with `tpu_inference` 0.29.0) |
-| libtpu | 0.0.44 |
-
-## Running
-
-```bash
-# Train for 50 steps (default --num_steps 50; resumes from the latest checkpoint if present).
-# Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
-# 512, lr held to step 40 then cosine decay to --lr_end at --num_steps.
-python train_planestrike.py \
-  --run_dir runs/grpo_6x6_tool_soft512_50 \
-  --learning_rate 2e-6 \
-  --lr_end 2e-7
-```
-
-Metrics are logged to W&B (project `planestrike`, `--wandb_project`) whenever
-`wandb` is installed and logged in; set `WANDB_MODE=disabled` to turn it off.
-Per-step game stats are logged under `game/train/*` and `game/eval/*` (`length`,
-`win_rate`, `hits`, `repeats`, `invalid`, and `tool_calls`: strike tool calls
-per game, `tool_call_rate`: share of turns making exactly one call). The W&B
-run id is saved in `<run_dir>/wandb_id.txt` so resuming a run continues the same W&B run.

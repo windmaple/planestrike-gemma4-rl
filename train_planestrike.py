@@ -13,7 +13,7 @@ arg_parser.add_argument("--run_dir", required=True)
 arg_parser.add_argument("--ckpt_dir", default="",
                         help="Default: /dev/shm/planestrike/<run name>/ckpt "
                         "(a full fp32 actor+Adam checkpoint is ~60GB).")
-arg_parser.add_argument("--num_steps", type=int, default=70)
+arg_parser.add_argument("--num_steps", type=int, default=100)
 arg_parser.add_argument("--batch_size", type=int, default=8, help="Boards per step.")
 arg_parser.add_argument("--num_generations", type=int, default=8, help="Games per board.")
 arg_parser.add_argument("--learning_rate", type=float, default=3e-6,
