@@ -107,7 +107,6 @@ from tunix.rl import trainer as rl_trainer
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
-from tunix.sft import utils as sft_utils
 
 import agent as agent_lib
 import env as env_lib
@@ -242,13 +241,11 @@ config.flash_attention_block_size = 256
 config.use_sliding_window_kv_cache = False
 config.dtype = jnp.bfloat16
 
-show_hbm_usage = sft_utils.show_hbm_usage
 # With beta == 0 the reference model is never used; skip it to save HBM.
 reference = (params_lib.create_model_from_safe_tensors(model_dir, config, mesh, dtype=jnp.bfloat16)
              if args.beta > 0 else None)
 # fp32 actor storage: bf16 would round lr~1e-6 Adam updates away.
 actor = params_lib.create_model_from_safe_tensors(model_dir, config, mesh, dtype=jnp.float32)
-show_hbm_usage("after loading actor and reference")
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_VERSION)
 chat_parser = strike_tool.Gemma4ToolChatTemplateParser(
@@ -453,7 +450,6 @@ if args.latency_hiding_scheduler_off == "train_step":
 
 rl_engine = rl_engine_lib.RLEngine(
     actor=actor, reference=reference, tokenizer=tokenizer, cluster_config=cluster_config)
-show_hbm_usage("after RLEngine creation")
 
 
 def metric_fn(prompts, completions, rewards, advantages, **kwargs):
@@ -474,11 +470,7 @@ learner = PlaneStrikeGRPOLearner(
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
 )
-show_hbm_usage("after learner creation")
 if rl_engine.global_steps > 0:
-  # RLEngine loads the actor's weights into vLLM before the trainer restores
-  # the checkpoint, so after a resume vLLM would sample from the base model
-  # until the first post-update sync. Push the restored weights now.
   rl_engine.rollout.update_params(
       nnx.state(rl_engine.actor_trainer.model, nnx.Param), (nnx.Param,))
   absl_logging.info("Synced restored step-%d actor weights to vLLM.", rl_engine.global_steps)
