@@ -256,7 +256,9 @@ def make_learning_rate():
   # step. Adam's update count is checkpointed, so a resume keeps its place.
   if not args.lr_schedule:
     if args.lr_decay == "none":
-      return args.learning_rate
+      # A schedule, not a float: the optimizer state then has the same structure
+      # (a step count) as with the other schedules, so checkpoints stay resumable.
+      return optax.constant_schedule(args.learning_rate)
     decay_start = args.lr_decay_start * args.batch_size
     return optax.join_schedules(
         [optax.constant_schedule(args.learning_rate),
