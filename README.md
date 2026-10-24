@@ -8,7 +8,7 @@ conversation and is fine-tuned with GRPO.
 Train metrics of a 100-step run with the defaults below: win rate 0.17 -> 0.95,
 game length 22 -> ~15.7 strikes, repeats and invalid strikes down to ~0.
 
-![Train metrics of a 100-step run: win rate, tool calls, game length, tool-call rate, repeats and invalid strikes per step](sample_run.png)
+![Train metrics of a 100-step run: win rate, tool calls, game length, tool-call rate, repeats and invalid strikes per step](sample_train_curves.png)
 
 ## Running
 
