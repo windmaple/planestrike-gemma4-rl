@@ -41,7 +41,7 @@ TPU v6e-8 single host with Python 3.12:
 | `env.py` | `PlaneStrikeEnv(BaseTaskEnv)`: the original game on a 6x6 board (same plane placement code as `common.py`), capped at 23 strikes (`env.MAX_STEPS`). |
 | `agent.py` | `PlaneStrikeAgent(ConversationAgentBase)`: system prompt (rules only), per-turn board message with the "don't strike tried cells" reminder, and turning the model's `strike` tool call (after the thought channel) into the env action. |
 | `strike_tool.py` | The `strike` tool (`BaseTool`: `strike(cell="C5")` returns ```` ```C5``` ````), Gemma 4 tool-call parsing, and a `Gemma4ChatTemplateParser` subclass that adds the native tool declaration and renders strike results as in-turn tool responses. |
-| `train_planestrike.py` | Agentic GRPO training (Tunix `GRPOLearner`, vLLM rollout, mesh (fsdp, tp) = (8, 1)). Boards are generated on the fly from seeds. Also holds runtime memory patches (sequence-chunked MLP under remat, frozen per-layer embedding table, per-step XLA scheduler options) so 34k-token sequences fit in HBM without modifying Tunix. |
+| `train_planestrike.py` | Agentic GRPO training (Tunix `GRPOLearner`, vLLM rollout, mesh (fsdp, tp) = (8, 1)). Boards are generated on the fly from seeds. |
 | `turn_credit.py` | Turn-level GRPO advantages (per-strike discounted returns, group-normalized), over-budget trimming, truncation penalty. |
 
 ## Game, observation, reward

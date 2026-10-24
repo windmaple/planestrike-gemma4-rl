@@ -1,7 +1,6 @@
 """Agentic GRPO on Plane Strike with Gemma 4 E2B (thinking mode) on TPU v6e-8."""
 
 import argparse
-import functools
 import json
 import logging
 import os
@@ -38,9 +37,11 @@ arg_parser.add_argument("--turn_gamma", type=float, default=0.5,
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--max_steps_per_game", type=int, default=23,
                         help="Must match env.MAX_STEPS (also stated in the system prompt).")
-arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=32768,
-                        help="Token budget for a whole game after the first prompt.")
+arg_parser.add_argument("--max_prompt_length", type=int, default=512,
+                        help="The first prompt is 436 tokens; Tunix pads it to this length.")
+arg_parser.add_argument("--max_response_length", type=int, default=11776,
+                        help="Token budget for a whole game after the first prompt "
+                        "(longest game seen: 12.2k; 0.4%% of early games are longer).")
 arg_parser.add_argument("--max_tokens_per_turn", type=int, default=2048)
 arg_parser.add_argument("--soft_tokens_per_turn", type=int, default=512,
                         help="Turns longer than this get a linear penalty up to "
@@ -53,12 +54,6 @@ arg_parser.add_argument("--vllm_max_num_seqs", type=int, default=64)
 arg_parser.add_argument("--vllm_max_batched_tokens", type=int, default=8192)
 arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--compute_logps_chunk_size", type=int, default=1024)
-arg_parser.add_argument("--latency_hiding_scheduler_off", default="train_step",
-                        choices=["train_step", "global", "none"])
-arg_parser.add_argument("--freeze_ple", type=int, default=1,
-                        help="Freeze the 2.35B-param per-layer embedding table (memory patch).")
-arg_parser.add_argument("--mlp_chunk_size", type=int, default=2048,
-                        help="Sequence chunk for the MLP under remat (memory patch).")
 arg_parser.add_argument("--eval_every", type=int, default=10)
 arg_parser.add_argument("--num_eval_boards", type=int, default=8)
 arg_parser.add_argument("--save_every", type=int, default=5)
@@ -69,13 +64,11 @@ arg_parser.add_argument("--wandb_project", default="planestrike")
 args, _ = arg_parser.parse_known_args()
 
 # XLA's latency-hiding scheduler overlaps layers in the train step and keeps
-# many layers' activations alive: 28.6 GB of temporaries per chip at 34k tokens
-# vs 17.4 GB without it. "train_step" turns it off only
-# for the trainer's jitted step (vLLM keeps it); "global" for the whole process.
-if args.latency_hiding_scheduler_off == "global":
-  os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_enable_latency_hiding_scheduler=false"
-  ).strip()
+# many layers' MLP activations ([seq, 12288] each) alive at once; with it on, the
+# train step does not fit in HBM. Must be set before JAX initializes the TPUs.
+os.environ["LIBTPU_INIT_ARGS"] = (
+    os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_enable_latency_hiding_scheduler=false"
+).strip()
 
 os.makedirs(args.run_dir, exist_ok=True)
 RUN_NAME = os.path.basename(os.path.normpath(args.run_dir))
@@ -103,7 +96,6 @@ import transformers
 from tunix.models.gemma4 import model as model_lib
 from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.rl import rl_cluster as rl_engine_lib
-from tunix.rl import trainer as rl_trainer
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -371,84 +363,6 @@ grpo_config = GRPOConfig(
     overlong_filter=False,
     exact_token_continuity=True,
 )
-
-# ====== Memory patches ======
-# Runtime patches so 34k-token sequences fit in HBM without modifying Tunix:
-# sequence-chunked MLP under remat, frozen per-layer embedding table, and XLA
-# options for the train step only.
-_original_block = model_lib.FeedForward.block
-
-
-def patch_chunked_mlp(chunk_size: int) -> None:
-  if chunk_size <= 0:
-    return
-
-  def chunked_block(self, x):
-    *lead, seq_len, dim = x.shape
-    if seq_len <= chunk_size:
-      return _original_block(self, x)
-    pad = (-seq_len) % chunk_size
-    xp = jnp.pad(x, [(0, 0)] * len(lead) + [(0, pad), (0, 0)])
-    n = xp.shape[-2] // chunk_size
-    xc = jnp.moveaxis(xp.reshape(*lead, n, chunk_size, dim), -3, 0)
-    graphdef, state = nnx.split(self)
-
-    @jax.checkpoint
-    def one_chunk(state, chunk):
-      return _original_block(nnx.merge(graphdef, state), chunk)
-
-    _, yc = jax.lax.scan(lambda c, chunk: (c, one_chunk(state, chunk)), None, xc)
-    y = jnp.moveaxis(yc, 0, -3).reshape(*lead, n * chunk_size, -1)
-    return y[..., :seq_len, :]
-
-  model_lib.FeedForward.block = chunked_block
-
-
-class FrozenParam(nnx.Variable):
-  """A model weight that is not trained (not an nnx.Param)."""
-
-
-def freeze_per_layer_embedding(model, dtype=jnp.bfloat16) -> None:
-  embedder = model.embedder
-  var = embedder.per_layer_input_embedding
-  value = var[...]
-  sharding = value.sharding
-  with jax.set_mesh(sharding.mesh):
-    # The released checkpoint is bf16, so the bf16 copy is exact.
-    frozen = FrozenParam(value.astype(dtype), **var.get_metadata())
-  assert frozen[...].sharding.is_equivalent_to(sharding, value.ndim), frozen[...].sharding
-  embedder.per_layer_input_embedding = frozen
-
-
-def compile_train_step_with_options(trainer_cls, compiler_options: dict) -> None:
-  """Passes XLA `compiler_options` to the jax.jit behind the trainer's train/eval steps.
-
-  Lets the train step be compiled without the latency-hiding scheduler (which
-  keeps many layers' activations alive) while vLLM's programs keep it.
-  nnx.jit has no compiler_options argument, so jax.jit is wrapped only while
-  `jit_train_and_eval_step` builds the jitted functions.
-  """
-  original = trainer_cls.jit_train_and_eval_step
-
-  def wrapped(self, *args, **kwargs):
-    real_jit = jax.jit
-    jax.jit = functools.partial(real_jit, compiler_options=compiler_options)
-    try:
-      return original(self, *args, **kwargs)
-    finally:
-      jax.jit = real_jit
-
-  trainer_cls.jit_train_and_eval_step = wrapped
-
-
-# Applied before RLEngine creation: the optimizer state is built for the actor's
-# nnx.Params then, and the train step is compiled during learner.train().
-if args.freeze_ple:
-  freeze_per_layer_embedding(actor)
-patch_chunked_mlp(args.mlp_chunk_size)
-if args.latency_hiding_scheduler_off == "train_step":
-  compile_train_step_with_options(
-      rl_trainer.Trainer, {"xla_tpu_enable_latency_hiding_scheduler": False})
 
 rl_engine = rl_engine_lib.RLEngine(
     actor=actor, reference=reference, tokenizer=tokenizer, cluster_config=cluster_config)
