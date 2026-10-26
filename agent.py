@@ -135,5 +135,4 @@ class PlaneStrikeAgent(base_agent.ConversationAgentBase):
     self._trajectory.steps.append(self.cur_step)
     self.cur_step.action = action
     self.cur_step.model_response = response
-    self.step += 1
     return agent_types.Action(action=action)

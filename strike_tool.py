@@ -25,7 +25,6 @@ _STR = '<|"|>'  # Gemma 4's string delimiter in tool calls and responses.
 _CALL_RE = re.compile(r"<\|tool_call>call:(\w+)\{(.*?)\}<tool_call\|>", re.DOTALL)
 _CELL_ARG_RE = re.compile(r'(?:^|,)\s*cell:\s*(?:<\|"\|>|")?([^<",}]*)')
 
-
 class StrikeTool(base_tool.BaseTool):
   """strike(cell) -> "```<cell>```"."""
 
@@ -52,7 +51,6 @@ class StrikeTool(base_tool.BaseTool):
     del kwargs
     return base_tool.ToolOutput(name=self.name, output=f"```{str(cell).strip()}```")
 
-
 def parse_tool_calls(text: str) -> list[tuple[str, dict[str, str]]]:
   """Returns (tool name, {"cell": ...}) for each Gemma 4 tool call in `text`."""
   calls = []
@@ -60,7 +58,6 @@ def parse_tool_calls(text: str) -> list[tuple[str, dict[str, str]]]:
     m = _CELL_ARG_RE.search(body)
     calls.append((name, {"cell": m.group(1).strip()} if m else {}))
   return calls
-
 
 def render_tool_declarations(tokenizer, tools: list[base_tool.BaseTool]) -> str:
   """The `<|tool>declaration:...<tool|>` block that Gemma 4's own chat template
@@ -72,7 +69,6 @@ def render_tool_declarations(tokenizer, tools: list[base_tool.BaseTool]) -> str:
   block = text.split(mark, 1)[1].split("<turn|>", 1)[0]
   assert block.startswith("<|tool>"), block
   return block
-
 
 class Gemma4ToolChatTemplateParser(parser_lib.Gemma4ChatTemplateParser):
   """Gemma4ChatTemplateParser plus native tool declarations and in-turn tool

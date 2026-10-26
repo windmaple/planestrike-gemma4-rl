@@ -3,13 +3,13 @@
 Agentic RL using the environment from a previous blog ["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html) + an LLM agent, which uses Gemma 4 E2B (thinking mode on) to play the game in a multi-turn
 conversation and is fine-tuned with GRPO.
 
-## Sample run
+## Sample training run
 
-Train metrics of a 100-step run with an earlier turn-level credit assignment
-(since removed): win rate 0.17 -> 0.95, game length 22 -> ~15.7 strikes, repeats
-and invalid strikes down to ~0.
+Train metrics of a 100-step run.
 
 ![Train metrics of a 100-step run: win rate, tool calls, game length, tool-call rate, repeats and invalid strikes per step](sample_train_curves.png)
+
+Better result can potentially be achieved with turn-level credit assignement.
 
 ## Running
 
@@ -77,13 +77,6 @@ TPU v6e-8 single host with Python 3.12:
   and -0.5 per strike. The trajectory reward is the sum, i.e.
   `hits - 0.5 * game_length - repeats - invalid`. Every unfinished game has
   length 23, so the step cost only separates finished games: shorter is better.
-
-## Credit assignment: trajectory-level GRPO
-
-Tunix's agentic `GRPOLearner` as is: every token of a game gets the same
-advantage, computed from the game's total reward (plus the truncation and
-long-turn penalties) relative to the other games on the same board
-(`--advantage_estimator rloo`).
 
 
 

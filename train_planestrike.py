@@ -75,11 +75,11 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-from absl import logging as absl_logging  # pylint: disable=g-import-not-at-top
+from absl import logging as absl_logging
 absl_logging.use_python_logging()
 absl_logging.set_verbosity(absl_logging.INFO)
 
-from flax import nnx  # pylint: disable=g-import-not-at-top
+from flax import nnx
 import huggingface_hub
 import jax
 from jax import numpy as jnp
@@ -94,12 +94,10 @@ from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
-
 import agent as agent_lib
 import env as env_lib
 import strike_tool
 import trajectory_utils
-
 
 print("jax devices:", jax.devices())
 MODEL_VERSION = "google/gemma-4-E2B-it"
@@ -107,7 +105,6 @@ MESH_SHAPE = (8, 1)  # (fsdp, tp) for actor, reference and rollout.
 MESH_AXIS_NAMES = ("fsdp", "tp")
 EVAL_SEED_OFFSET = 10_000_000  # Held-out eval boards.
 TRAIN_SEED_OFFSET = 1_000_000 * (1 + args.seed)
-
 
 # ====== Game logging (raw game length per game) ======
 GAMES_PATH = os.path.join(args.run_dir, "games.jsonl")
@@ -119,7 +116,6 @@ if os.path.exists(GAMES_PATH):  # Resumed run: continue the game index.
       game_counts[split] = game_counts.get(split, 0) + 1
 games_writer = SummaryWriter(os.path.join(TB_DIR, "games"))
 
-
 def log_game_to_tensorboard(record):
   split = record["split"]
   game_counts[split] = game_counts.get(split, 0) + 1
@@ -127,10 +123,8 @@ def log_game_to_tensorboard(record):
   games_writer.add_scalar(f"{split}/hits", record["hits"], game_counts[split])
   games_writer.flush()
 
-
 env_lib.GameLogger.path = GAMES_PATH
 env_lib.GameLogger.listeners.append(log_game_to_tensorboard)
-
 
 # ====== Data: generated on the fly ======
 class BoardSeeds:
@@ -148,19 +142,14 @@ class BoardSeeds:
           "split": [self.split] * self.batch_size,
       }
 
-
 train_dataset = BoardSeeds(TRAIN_SEED_OFFSET, args.batch_size, args.num_steps, "train")
 eval_dataset = BoardSeeds(EVAL_SEED_OFFSET, args.num_eval_boards, 1, "eval")
 
-
-# ====== Learner with a per-turn generation cap ======
-# Module-level copies: methods below take *args, which would shadow `args`.
 args_max_response_length = args.max_response_length
 MAX_STEPS_PER_GAME = args.max_steps_per_game
 SOFT_TOKENS_PER_TURN = args.soft_tokens_per_turn
 MAX_TOKENS_PER_TURN = args.max_tokens_per_turn
 TURN_LENGTH_PENALTY = args.turn_length_penalty
-
 
 class PlaneStrikeGRPOLearner(GRPOLearner):
   """Caps each turn's generation so one runaway thought cannot consume the
@@ -213,7 +202,6 @@ class PlaneStrikeGRPOLearner(GRPOLearner):
                              item.traj.get("group_id"), args_max_response_length)
     return super()._process_results(trajectories, mode=mode, expected_step=expected_step)
 
-
 # ====== Model ======
 model_dir = huggingface_hub.snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
 mesh = jax.make_mesh(MESH_SHAPE, MESH_AXIS_NAMES,
@@ -255,7 +243,6 @@ def make_learning_rate():
   return optax.piecewise_constant_schedule(
       points[0][1],
       {step * args.batch_size: lr / prev for (step, lr), (_, prev) in zip(points[1:], points)})
-
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(args.max_grad_norm),
@@ -366,7 +353,6 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   absl_logging.info("[group] reward mean=%.2f min=%.2f max=%.2f",
                     rewards.mean(), rewards.min(), rewards.max())
   return {"rewards/group_std": (float(rewards.std()), np.mean)}
-
 
 learner = PlaneStrikeGRPOLearner(
     rl_engine=rl_engine,
