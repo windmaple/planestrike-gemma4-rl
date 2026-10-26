@@ -5,8 +5,9 @@ conversation and is fine-tuned with GRPO.
 
 ## Sample run
 
-Train metrics of a 100-step run with the defaults below: win rate 0.17 -> 0.95,
-game length 22 -> ~15.7 strikes, repeats and invalid strikes down to ~0.
+Train metrics of a 100-step run with an earlier turn-level credit assignment
+(since removed): win rate 0.17 -> 0.95, game length 22 -> ~15.7 strikes, repeats
+and invalid strikes down to ~0.
 
 ![Train metrics of a 100-step run: win rate, tool calls, game length, tool-call rate, repeats and invalid strikes per step](sample_train_curves.png)
 
@@ -14,7 +15,7 @@ game length 22 -> ~15.7 strikes, repeats and invalid strikes down to ~0.
 
 ```bash
 # Train for 100 steps (default --num_steps 100; resumes from the latest checkpoint if present).
-# Defaults: turn-level advantages, per-turn cap 2048, soft overlong penalty from
+# Defaults: trajectory-level advantages, per-turn cap 2048, soft overlong penalty from
 # 512, lr held to step 40 then cosine decay to --lr_end at --num_steps.
 python train_planestrike.py \
   --run_dir runs/grpo_6x6_tool_soft512_100 \
@@ -42,7 +43,7 @@ TPU v6e-8 single host with Python 3.12:
 | `agent.py` | `PlaneStrikeAgent(ConversationAgentBase)`: system prompt (rules only), per-turn board message with the "don't strike tried cells" reminder, and turning the model's `strike` tool call (after the thought channel) into the env action. |
 | `strike_tool.py` | The `strike` tool (`BaseTool`: `strike(cell="C5")` returns ```` ```C5``` ````), Gemma 4 tool-call parsing, and a `Gemma4ChatTemplateParser` subclass that adds the native tool declaration and renders strike results as in-turn tool responses. |
 | `train_planestrike.py` | Agentic GRPO training (Tunix `GRPOLearner`, vLLM rollout, mesh (fsdp, tp) = (8, 1)). Boards are generated on the fly from seeds. |
-| `turn_credit.py` | Turn-level GRPO advantages (per-strike discounted returns, group-normalized), over-budget trimming, truncation penalty. |
+| `trajectory_utils.py` | Per-turn token counts, tool calls and the game record on each trajectory, over-budget trimming, truncation and long-turn penalties. |
 
 ## Game, observation, reward
 
@@ -79,24 +80,12 @@ TPU v6e-8 single host with Python 3.12:
   `hits - 0.5 * game_length - repeats - invalid`. Every unfinished game has
   length 23, so the step cost only separates finished games: shorter is better.
 
-## Credit assignment: turn-level GRPO
+## Credit assignment: trajectory-level GRPO
 
-Tunix's agentic GRPO gives every token of a game the same advantage (from the
-episode's total reward). A first run with that setting (30-strike cap, 30 steps)
-barely moved: train game length stayed ~28.5 while entropy fell 0.33 -> 0.19
-and thinking grew 7.9k -> 13k tokens per game. With ~30 turns sharing one
-advantage, the outcome is dominated by luck in finding the plane.
-
-The original JAX example rewards each strike with discounted returns
-(`common.compute_rewards`, `GAMMA = 0.5`). `turn_credit.py` does the same
-inside GRPO, still critic-free and group-relative:
-
-    G_t = r_t + 0.5 * G_{t+1}                      per turn of each game
-    A_t = (G_t - mean) / std                       over all turns of the 8 games on one board
-
-and every token generated in turn t gets `A_t` (Tunix's loss already accepts
-`[batch, length]` advantages). Selected with `--advantage_mode turn` (default);
-`--advantage_mode trajectory` is the stock behavior.
+Tunix's agentic `GRPOLearner` as is: every token of a game gets the same
+advantage, computed from the game's total reward (plus the truncation and
+long-turn penalties) relative to the other games on the same board
+(`--advantage_estimator rloo`).
 
 
 

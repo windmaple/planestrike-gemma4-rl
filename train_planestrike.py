@@ -28,12 +28,7 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.003)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
 arg_parser.add_argument("--loss_algo", default="gspo-token")
-arg_parser.add_argument("--advantage_estimator", default="rloo",
-                        help="Used only with --advantage_mode trajectory.")
-arg_parser.add_argument("--advantage_mode", default="turn", choices=["turn", "trajectory"],
-                        help="turn: per-strike discounted returns, group-normalized (turn_credit.py).")
-arg_parser.add_argument("--turn_gamma", type=float, default=0.5,
-                        help="Discount for --advantage_mode turn (original example: GAMMA = 0.5).")
+arg_parser.add_argument("--advantage_estimator", default="rloo")
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--max_steps_per_game", type=int, default=23,
                         help="Must match env.MAX_STEPS (also stated in the system prompt).")
@@ -103,7 +98,7 @@ from tunix.sft import metrics_logger
 import agent as agent_lib
 import env as env_lib
 import strike_tool
-import turn_credit
+import trajectory_utils
 
 
 print("jax devices:", jax.devices())
@@ -165,18 +160,15 @@ MAX_STEPS_PER_GAME = args.max_steps_per_game
 SOFT_TOKENS_PER_TURN = args.soft_tokens_per_turn
 MAX_TOKENS_PER_TURN = args.max_tokens_per_turn
 TURN_LENGTH_PENALTY = args.turn_length_penalty
-_LearnerBase = turn_credit.TurnCreditGRPOLearner if args.advantage_mode == "turn" else GRPOLearner
 
 
-class PlaneStrikeGRPOLearner(_LearnerBase):
+class PlaneStrikeGRPOLearner(GRPOLearner):
   """Caps each turn's generation so one runaway thought cannot consume the
   whole game's token budget (which would clip every later turn)."""
 
-  turn_gamma = args.turn_gamma
-
   def _build_orchestrator(self):
     orchestrator = super()._build_orchestrator()
-    orchestrator.engine_cls = turn_credit.StepInfoEngine  # Adds "game_record".
+    orchestrator.engine_cls = trajectory_utils.StepInfoEngine  # Adds "game_record", turn spans, tool calls.
     return orchestrator
 
   def _model_call(self, chat_lists, env=None, max_generation_steps=None, **kwargs):
@@ -212,11 +204,11 @@ class PlaneStrikeGRPOLearner(_LearnerBase):
           },
           mode=mode, step=expected_step)
     for item in trajectories:
-      turn_credit.penalize_truncation(item.traj, MAX_STEPS_PER_GAME, env_lib.STEP_COST)
+      trajectory_utils.penalize_truncation(item.traj, MAX_STEPS_PER_GAME, env_lib.STEP_COST)
       if SOFT_TOKENS_PER_TURN > 0:
-        turn_credit.penalize_long_turns(item.traj, SOFT_TOKENS_PER_TURN, MAX_TOKENS_PER_TURN,
-                                        TURN_LENGTH_PENALTY)
-      if turn_credit.clip_to_budget(item.traj, args_max_response_length):
+        trajectory_utils.penalize_long_turns(item.traj, SOFT_TOKENS_PER_TURN, MAX_TOKENS_PER_TURN,
+                                             TURN_LENGTH_PENALTY)
+      if trajectory_utils.clip_to_budget(item.traj, args_max_response_length):
         absl_logging.warning("Trimmed an over-budget trajectory (group %s) to %d tokens.",
                              item.traj.get("group_id"), args_max_response_length)
     return super()._process_results(trajectories, mode=mode, expected_step=expected_step)
