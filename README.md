@@ -1,6 +1,6 @@
 # Plane Strike with Gemma 4 E2B + agentic RL (Tunix)
 
-Agentic RL using the environment from a previous blog["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html) + an LLM agent, which uses Gemma 4 E2B (thinking mode on) to play the game in a multi-turn
+Agentic RL using the environment from a previous blog ["Building a reinforcement learning agent with JAX, and deploying it on Android with TensorFlow Lite"](https://blog.tensorflow.org/2022/09/building-reinforcement-learning-agent-with-JAX-and-deploying-it-on-android-with-tensorflow-lite.html) + an LLM agent, which uses Gemma 4 E2B (thinking mode on) to play the game in a multi-turn
 conversation and is fine-tuned with GRPO.
 
 ## Sample run
@@ -15,8 +15,6 @@ and invalid strikes down to ~0.
 
 ```bash
 # Train for 100 steps (default --num_steps 100; resumes from the latest checkpoint if present).
-# Defaults: trajectory-level advantages, per-turn cap 2048, soft overlong penalty from
-# 512, lr held to step 40 then cosine decay to --lr_end at --num_steps.
 python train_planestrike.py \
   --run_dir runs/grpo_6x6_tool_soft512_100 \
   --learning_rate 2e-6 \
